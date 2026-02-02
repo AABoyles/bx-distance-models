@@ -1,0 +1,19 @@
+{
+  "name": "bx-distance-models",
+  "version": "0.1.0",
+  "description": "High-performance nucleotide sequence distance calculations compiled to WebAssembly",
+  "type": "module",
+  "scripts": {
+    "build": "wasm-pack build --target web --out-dir pkg",
+    "build:release": "wasm-pack build --target web --release --out-dir pkg",
+    "test": "cargo test"
+  },
+  "main": "pkg/bx_distance_models.js",
+  "types": "pkg/bx_distance_models.d.ts",
+  "files": [
+    "pkg/bx_distance_models_bg.wasm",
+    "pkg/bx_distance_models.js",
+    "pkg/bx_distance_models.d.ts",
+    "pkg/bx_distance_models_bg.wasm.d.ts"
+  ]
+}
