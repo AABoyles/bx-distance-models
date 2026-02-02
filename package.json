@@ -8,6 +8,10 @@
     "build:release": "wasm-pack build --release",
     "prepublishonly": "npm run build:release"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AABoyles/bx-distance-models.git"
+  },
   "main": "pkg/bx_distance_models.js",
   "types": "pkg/bx_distance_models.d.ts",
   "files": [
