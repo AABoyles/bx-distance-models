@@ -1,0 +1,16 @@
+# Standalone kernel benchmark crate (not part of the published library).
+# Exports raw extern "C" functions so the harness times the kernels, not wasm-bindgen glue.
+[package]
+name = "bench-kernels"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

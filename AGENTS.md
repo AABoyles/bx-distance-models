@@ -21,6 +21,11 @@ bx-distance-models/
 │   │   ├── evolutionary.rs       # TN93, JC69, K2P, TN92
 │   │   └── diagnostics.rs        # Transitions/transversions/ratios
 │   └── tests.rs                  # Unit tests
+├── bench/                        # Benchmark harness (see bench/README.md)
+│   ├── kernels/                  # Standalone kernel-benchmark crate (raw extern "C" exports)
+│   └── *.mjs                     # Node drivers: kernels, public API, workers; synthetic data
+├── docs/
+│   └── performance-analysis.md   # Where the time goes and what to optimize, with measurements
 ├── pkg/                          # Generated WASM bindings (build output)
 ├── Cargo.toml                    # Rust dependencies + build config
 ├── package.json                  # NPM metadata, build scripts
@@ -108,6 +113,7 @@ src/*.rs → wasm-pack → pkg/
 - `npm run build` → dev build (fast compile, unoptimized WASM)
 - `npm run build:release` → optimized build (slower compile, faster runtime)
 - `cargo test` → run Rust unit tests
+- `npm run bench:build` then `npm run bench:kernels` / `bench:api` / `bench:workers` → benchmarks (see `bench/README.md`)
 
 ## Dependencies
 

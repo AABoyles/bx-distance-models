@@ -278,6 +278,7 @@ bx-distance-models/
 - **Batch Processing**: Use `compute_pairwise_distances()` for multiple sequences rather than calling single-distance functions repeatedly
 - **Memory**: WASM runs in the same heap as JavaScript; large sequences may impact garbage collection
 - **Optimized Release Build**: Always use `npm run build:release` for production deployments
+- **Benchmarks**: [`docs/performance-analysis.md`](docs/performance-analysis.md) measures where the time goes; the harness lives in [`bench/`](bench/README.md)
 
 ## Common Issues
 
