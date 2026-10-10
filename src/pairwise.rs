@@ -1,52 +1,58 @@
-/// Pairwise distance computation functions
+/// Pairwise distance computation functions.
+///
+/// These predate `SequenceSet` and keep their signatures; they now run on the same encoded
+/// kernel. Prefer `SequenceSet` for new code: it encodes once, supports every metric, row
+/// ranges, ambiguity modes and thresholded output.
 use wasm_bindgen::prelude::*;
 use js_sys::{Array, Float64Array, Object, Reflect};
-use crate::metrics::{hamming_distance, tn93_distance, snps_distance};
+use crate::encoding::Ambiguity;
+use crate::metrics::Metric;
+use crate::sequence_set::{pairs_before_row, SequenceSet};
+
+/// Any metric name `SequenceSet` accepts; unknown names fall back to Hamming as before.
+fn legacy_metric(name: &str) -> Metric {
+    Metric::parse(name).unwrap_or(Metric::Hamming)
+}
+
+/// Extracts every element of `seqs` as a string, or `None` if any is not a string.
+fn strings(seqs: &Array) -> Option<Vec<String>> {
+    seqs.iter().map(|s| s.as_string()).collect()
+}
 
 /// Compute all pairwise distances for a list of sequences.
 /// Takes an array of {id: string, seq: string} objects and returns
 /// an array of {source: string, target: string, distance: number} objects.
 ///
-/// This is the main entry point for bulk distance computation.
+/// Creating one JS object per pair costs far more than the distance itself;
+/// `SequenceSet.distances()` or `SequenceSet.links()` avoid it.
 #[wasm_bindgen]
 pub fn compute_pairwise_distances(nodes: &Array, metric: &str) -> Array {
-    let n = nodes.length() as usize;
-    let result = Array::new();
-
-    // Extract sequences into Vec for faster access
-    let mut seqs: Vec<(String, String)> = Vec::with_capacity(n);
-
-    for i in 0..n {
-        let node = nodes.get(i as u32);
-        if let (Ok(id), Ok(seq)) = (
-            Reflect::get(&node, &JsValue::from_str("id")),
-            Reflect::get(&node, &JsValue::from_str("seq")),
-        ) {
-            if let (Some(id_str), Some(seq_str)) = (id.as_string(), seq.as_string()) {
-                seqs.push((id_str, seq_str));
+    let (key_id, key_seq) = (JsValue::from_str("id"), JsValue::from_str("seq"));
+    let mut ids = Vec::with_capacity(nodes.length() as usize);
+    let mut seqs = Vec::with_capacity(nodes.length() as usize);
+    for node in nodes.iter() {
+        if let (Ok(id), Ok(seq)) = (Reflect::get(&node, &key_id), Reflect::get(&node, &key_seq)) {
+            if let (true, Some(seq)) = (id.is_string(), seq.as_string()) {
+                ids.push(id);
+                seqs.push(seq);
             }
         }
     }
 
-    let use_tn93 = metric == "tn93";
-    let seq_count = seqs.len();
-
-    for i in 0..seq_count {
-        for j in (i + 1)..seq_count {
-            let dist = if use_tn93 {
-                tn93_distance(&seqs[i].1, &seqs[j].1)
-            } else {
-                hamming_distance(&seqs[i].1, &seqs[j].1)
-            };
-
+    let set = SequenceSet::from_strs(&seqs, Ambiguity::Skip);
+    let metric = legacy_metric(metric);
+    let (key_source, key_target, key_distance) =
+        (JsValue::from_str("source"), JsValue::from_str("target"), JsValue::from_str("distance"));
+    let result = Array::new();
+    for i in 0..ids.len() {
+        for j in (i + 1)..ids.len() {
             let edge = Object::new();
-            let _ = Reflect::set(&edge, &JsValue::from_str("source"), &JsValue::from_str(&seqs[i].0));
-            let _ = Reflect::set(&edge, &JsValue::from_str("target"), &JsValue::from_str(&seqs[j].0));
-            let _ = Reflect::set(&edge, &JsValue::from_str("distance"), &JsValue::from_f64(dist));
+            let _ = Reflect::set(&edge, &key_source, &ids[i]);
+            let _ = Reflect::set(&edge, &key_target, &ids[j]);
+            let _ = Reflect::set(&edge, &key_distance, &JsValue::from_f64(set.pair(metric, i, j)));
             result.push(&edge);
         }
     }
-
     result
 }
 
@@ -54,40 +60,18 @@ pub fn compute_pairwise_distances(nodes: &Array, metric: &str) -> Array {
 /// Takes:
 /// - _ids: Array of node ID strings (unused, provided for consistency)
 /// - seqs: Array of sequence strings
-/// - metric: "hamming" or "tn93"
+/// - metric: any metric name accepted by `SequenceSet` (unknown names use "hamming")
 ///
 /// Returns a Float64Array with distances in row-major upper triangular order.
 /// For n nodes, returns n*(n-1)/2 distances.
 #[wasm_bindgen]
 pub fn compute_pairwise_distances_flat(_ids: &Array, seqs: &Array, metric: &str) -> Float64Array {
-    let n = seqs.length() as usize;
-    let num_pairs = n * (n - 1) / 2;
-
-    // Extract sequences into Vec<String> for faster access
-    let seq_vec: Vec<String> = (0..n)
-        .filter_map(|i| seqs.get(i as u32).as_string())
-        .collect();
-
-    if seq_vec.len() != n {
+    let Some(seqs) = strings(seqs) else {
         return Float64Array::new_with_length(0);
-    }
-
-    let use_tn93 = metric == "tn93";
-    let mut distances = vec![0.0f64; num_pairs];
-    let mut idx = 0;
-
-    for i in 0..n {
-        for j in (i + 1)..n {
-            distances[idx] = if use_tn93 {
-                tn93_distance(&seq_vec[i], &seq_vec[j])
-            } else {
-                hamming_distance(&seq_vec[i], &seq_vec[j])
-            };
-            idx += 1;
-        }
-    }
-
-    Float64Array::from(distances.as_slice())
+    };
+    let set = SequenceSet::from_strs(&seqs, Ambiguity::Skip);
+    set.dense_js(&[legacy_metric(metric)], 0..set.len())
+        .unwrap_or_else(|e| wasm_bindgen::throw_str(&e))
 }
 
 /// Compute all pairwise distances (hamming, tn93, and snps) using flat arrays.
@@ -100,50 +84,21 @@ pub fn compute_pairwise_distances_flat(_ids: &Array, seqs: &Array, metric: &str)
 /// - tn93Distances[num_pairs..2*num_pairs)
 /// - snpsDistances[2*num_pairs..3*num_pairs)
 ///
-/// This efficiently computes all metrics in a single pass.
+/// Each pair is scanned once for all three metrics.
 #[wasm_bindgen]
 pub fn compute_pairwise_distances_flat_all(_ids: &Array, seqs: &Array) -> Float64Array {
-    let n = seqs.length() as usize;
-    let num_pairs = n * (n - 1) / 2;
-
-    // Extract sequences into Vec<String> for faster access
-    let seq_vec: Vec<String> = (0..n)
-        .filter_map(|i| seqs.get(i as u32).as_string())
-        .collect();
-
-    if seq_vec.len() != n {
+    let Some(seqs) = strings(seqs) else {
         return Float64Array::new_with_length(0);
-    }
-
-    // Allocate space for all three metrics
-    let total_len = num_pairs * 3;
-    let mut distances = vec![0.0f64; total_len];
-    let mut idx = 0;
-
-    for i in 0..n {
-        for j in (i + 1)..n {
-            // Compute all metrics in one pass
-            let seq1 = &seq_vec[i];
-            let seq2 = &seq_vec[j];
-
-            distances[idx] = hamming_distance(seq1, seq2);
-            distances[idx + num_pairs] = tn93_distance(seq1, seq2);
-            distances[idx + num_pairs * 2] = snps_distance(seq1, seq2);
-
-            idx += 1;
-        }
-    }
-
-    Float64Array::from(distances.as_slice())
+    };
+    let set = SequenceSet::from_strs(&seqs, Ambiguity::Skip);
+    set.dense_js(&[Metric::Hamming, Metric::Tn93, Metric::Snps], 0..set.len())
+        .unwrap_or_else(|e| wasm_bindgen::throw_str(&e))
 }
 
 /// Get the index into the flat distance array for a given (i, j) pair.
 /// Assumes i < j and n is the total number of nodes.
 #[wasm_bindgen]
 pub fn get_distance_index(i: u32, j: u32, n: u32) -> u32 {
-    // Upper triangular index formula
-    let i = i as usize;
-    let j = j as usize;
-    let n = n as usize;
-    (i * (2 * n - i - 1) / 2 + (j - i - 1)) as u32
+    // Upper triangular index formula, in 64 bits so the intermediate product cannot overflow
+    (pairs_before_row(n as usize, i as usize) + (j - i - 1) as u64) as u32
 }

@@ -13,7 +13,8 @@ encoding have to change together. After that, exact threshold pruning and Web Wo
 gain.
 
 All numbers below come from the harness in [`bench/`](../bench/README.md) and can be reproduced
-with `npm run bench:build && npm run bench:kernels`.
+with `npm run bench:build && npm run bench:kernels`. The recommendations have since been
+implemented; see [After the optimizations](#after-the-optimizations).
 
 ## Method
 
@@ -202,6 +203,61 @@ that actually contain ambiguities, resolving those (rare) sites in a separate fi
   falls back to the p-distance when the model saturates, so the most divergent pairs can report a
   smaller distance than moderately divergent ones.
 
+## After the optimizations
+
+Recommendations 1–5 are implemented: `SequenceSet` (encode once, dense or thresholded typed-array
+output, row ranges for chunking and workers), one counting kernel for every metric, exact early
+exit, and the legacy functions rebuilt on the same kernel. Ambiguity codes get the design sketched
+above: every sequence uses the 2-plane fast path, and sequences containing R/Y/… also keep a
+sparse list of those sites with their 4-bit IUPAC codes, resolved by a slower fallback.
+
+**Same benchmark, same machine** (n = 600, L = 1,000, warm, ns/pair):
+
+| Call | Before | After | Speedup |
+|---|---:|---:|---:|
+| `compute_pairwise_distances(objs, 'tn93')` | 18,752 | 1,359 | 14× |
+| `compute_pairwise_distances(objs, 'hamming')` | 6,690 | 1,377 | 4.9× |
+| `compute_pairwise_distances_flat(.., 'tn93')` | 14,705 | 240 | 61× |
+| `compute_pairwise_distances_flat(.., 'hamming')` | 3,495 | 171 | 20× |
+| JS loop over `tn93_distance(a, b)` | 22,897 | 9,096 | 2.5× |
+| **`new SequenceSet(seqs).distances('tn93')`** | — | **224** | 84× vs. objects |
+| **`SequenceSet.links('tn93', 0.015)`** (1,767 links) | — | **67** | 280× vs. objects |
+
+- **Objects are still expensive.** The object API now reuses the id values and key strings, which
+  cut its marshalling cost from ~3.3 to ~1.4 µs per pair (L = 16: 3,323 → 1,373 ns/pair), but that
+  is still 6× the whole TN93 computation. Use `distances()` or `links()`.
+- **Single-pair functions** use a branch-free 5×5 count table (11× faster kernel), but a JS loop
+  over them is dominated by copying both strings into WASM on every call (~8.5 µs/pair at
+  L = 1,000). That is what `SequenceSet` avoids.
+- **Large sets** (n = 4,000, 8 M pairs): encoding takes 56 ms; `distances('tn93')` 1.8 s;
+  `links('tn93', 0.015)` 0.52 s for 81,996 links; 4 workers via `row_splits` 0.64 s wall-clock for the
+  full matrix. The old object API would take about 150 s.
+- **One long call is fine now.** The first `distances()` call runs as fast as later ones (1,821
+  vs. 1,819 ms at n = 4,000), unlike the old flat API (1,117 vs. 628 ms). The per-pair kernel is a
+  separate function, and V8 sends later calls to its optimized version even while the outer call
+  is still running.
+- **Ambiguity fallback** (0.5% of sites are R/Y in every sequence): `'skip'` 223, `'resolve'`
+  317, `'average'` 330 ns/pair. The cost scales with the number of ambiguous sites (~9 ns each);
+  sequences without ambiguity codes stay on the fast path in every mode. A first version that
+  scanned every word of both sequences for ambiguous sites cost 529 ns/pair here; visiting only
+  the stored sites removed that fixed cost.
+- **Hamming/SNP-only metrics** run on the same full counting kernel as TN93 (~150 ns/pair at
+  L = 1,000). A mismatch-only kernel could make them ~3× faster (41 ns/pair in the kernel
+  benchmark); not done yet.
+
+**Behavior changes that came with the shared encoding:**
+
+- Every metric now uses one character rule: A/C/G/T in either case, U read as T; everything else
+  is skipped. On input made only of `A C G T N -`, every metric is bit-for-bit identical to the
+  old code; `cargo test` checks this on 700 random pairs against
+  verbatim copies of the old implementations. Lower case, U, ambiguity codes and other characters
+  used to count as mismatches in Hamming, SNPs, JC69, K2P and the Ts/Tv counts, and now do not.
+- The TN93 edge case above is fixed: an absent base drops its term instead of turning the
+  distance into 0.0.
+- The legacy batch functions accept every metric name instead of treating anything but `tn93` as
+  Hamming (unknown names still fall back to Hamming).
+- `get_distance_index` computes in 64 bits, so large `n` no longer overflows on wasm32.
+
 ## Reproducing
 
 ```bash
@@ -213,4 +269,6 @@ node bench/api.mjs 600 1000             # public API, realistic length
 node bench/api.mjs 1500 16              # public API, marshalling overhead only
 node bench/workers.mjs 4000 1000 1 2 4  # worker scaling
 node --liftoff-only bench/kernels.mjs 600 1000   # baseline tier only
+node bench/api.mjs 4000 1000 --set-only # SequenceSet at scale, incl. ambiguity modes
+node bench/workers-api.mjs 4000 1000    # workers via SequenceSet.row_splits
 ```

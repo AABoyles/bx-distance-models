@@ -1,111 +1,38 @@
 /// Basic distance metrics
 use wasm_bindgen::prelude::*;
-use crate::utils::*;
+use crate::counts::Counts;
 
 /// Count the number of nucleotide mismatches (SNPs) between two aligned sequences.
-/// Ignores positions where either sequence has a gap '-' or 'N'.
+/// Only sites where both sequences hold A, C, G or T (any case, U = T) are compared.
 /// Returns the absolute count of differences.
 #[wasm_bindgen]
 pub fn snps_distance(seq1: &str, seq2: &str) -> f64 {
-    let bytes1 = seq1.as_bytes();
-    let bytes2 = seq2.as_bytes();
-    let len = bytes1.len().min(bytes2.len());
-
-    if len == 0 {
-        return 0.0;
-    }
-
-    let mut mismatches = 0u32;
-
-    for i in 0..len {
-        let a = bytes1[i];
-        let b = bytes2[i];
-
-        // Skip gaps and N's
-        if a == b'-' || b == b'-' || a == b'N' || b == b'N' {
-            continue;
-        }
-
-        if a != b {
-            mismatches += 1;
-        }
-    }
-
-    mismatches as f64
+    snps(&Counts::from_strs(seq1, seq2))
 }
 
 /// Compute Hamming distance between two aligned sequences.
-/// Returns the proportion of differing positions (0 to 1).
-/// Ignores positions where either sequence has a gap '-' or 'N'.
+/// Returns the proportion of differing positions (0 to 1) among compared sites,
+/// or 1.0 if there are none.
 #[wasm_bindgen]
 pub fn hamming_distance(seq1: &str, seq2: &str) -> f64 {
-    let bytes1 = seq1.as_bytes();
-    let bytes2 = seq2.as_bytes();
-    let len = bytes1.len().min(bytes2.len());
-
-    if len == 0 {
-        return 1.0;
-    }
-
-    let mut mismatches = 0u32;
-    let mut compared = 0u32;
-
-    for i in 0..len {
-        let a = bytes1[i];
-        let b = bytes2[i];
-
-        // Skip gaps and N's
-        if a == b'-' || b == b'-' || a == b'N' || b == b'N' {
-            continue;
-        }
-
-        compared += 1;
-        if a != b {
-            mismatches += 1;
-        }
-    }
-
-    if compared == 0 {
-        1.0
-    } else {
-        mismatches as f64 / compared as f64
-    }
+    hamming(&Counts::from_strs(seq1, seq2))
 }
 
 /// Compute p-distance (simple proportion of differences).
-/// Similar to Hamming but with explicit gap handling.
-/// Returns the proportion of differing positions where both bases are valid.
+/// Identical to `hamming_distance`: both compare only sites where both sequences hold a base.
 #[wasm_bindgen]
 pub fn p_distance(seq1: &str, seq2: &str) -> f64 {
-    let bytes1 = seq1.as_bytes();
-    let bytes2 = seq2.as_bytes();
-    let len = bytes1.len().min(bytes2.len());
+    hamming(&Counts::from_strs(seq1, seq2))
+}
 
-    if len == 0 {
-        return 1.0;
+pub(crate) fn snps(c: &Counts) -> f64 {
+    c.mismatches()
+}
+
+pub(crate) fn hamming(c: &Counts) -> f64 {
+    if c.sites == 0.0 {
+        1.0
+    } else {
+        c.mismatches() / c.sites
     }
-
-    let mut differences = 0u32;
-    let mut compared = 0u32;
-
-    for i in 0..len {
-        let a = bytes1[i];
-        let b = bytes2[i];
-
-        // Only count positions where both are valid bases
-        if !is_valid_base(a) || !is_valid_base(b) {
-            continue;
-        }
-
-        compared += 1;
-        if a != b {
-            differences += 1;
-        }
-    }
-
-    if compared == 0 {
-        return 1.0;
-    }
-
-    differences as f64 / compared as f64
 }

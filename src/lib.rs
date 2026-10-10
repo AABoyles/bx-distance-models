@@ -1,6 +1,8 @@
-mod utils;
+mod encoding;
+mod counts;
 mod metrics;
 mod pairwise;
+mod sequence_set;
 
 #[cfg(test)]
 mod tests;
@@ -22,3 +24,4 @@ pub use metrics::basic::*;
 pub use metrics::evolutionary::*;
 pub use metrics::diagnostics::*;
 pub use pairwise::*;
+pub use sequence_set::{Links, SequenceSet};
