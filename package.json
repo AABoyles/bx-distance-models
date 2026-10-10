@@ -6,7 +6,13 @@
   "scripts": {
     "build": "wasm-pack build",
     "build:release": "wasm-pack build --release",
-    "prepublishonly": "npm run build:release"
+    "prepublishonly": "npm run build:release",
+    "bench:build": "npm run bench:build:kernels && npm run bench:build:api",
+    "bench:build:kernels": "cargo build --release --target wasm32-unknown-unknown --manifest-path bench/kernels/Cargo.toml && RUSTFLAGS='-C target-feature=+simd128' cargo build --release --target wasm32-unknown-unknown --manifest-path bench/kernels/Cargo.toml --target-dir bench/kernels/target/simd",
+    "bench:build:api": "wasm-pack build --release --target nodejs --out-dir pkg-node",
+    "bench:kernels": "node bench/kernels.mjs",
+    "bench:api": "node bench/api.mjs",
+    "bench:workers": "node bench/workers.mjs"
   },
   "repository": {
     "type": "git",
