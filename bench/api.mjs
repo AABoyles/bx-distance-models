@@ -50,7 +50,7 @@ if (!flags.includes('--set-only')) {
 if (!flags.includes('--legacy-only') && bx.SequenceSet) {
   const [encodeMs, set] = timed(() => new bx.SequenceSet(seqs));
   console.log(`${'new SequenceSet(seqs)  (encode once)'.padEnd(52)} ${encodeMs.toFixed(1)} ms`);
-  for (const metric of ['hamming', 'tn93']) {
+  for (const metric of ['hamming', 'snps', 'tn93']) {
     run(`set.distances('${metric}')`, () => set.distances(metric));
   }
   run(`set.distances('tn93') in blocks of 64 rows`, () => {
@@ -58,8 +58,8 @@ if (!flags.includes('--legacy-only') && bx.SequenceSet) {
     for (let r = 0; r < n; r += 64) parts.push(set.distances('tn93', r, Math.min(r + 64, n)));
     return parts;
   });
-  for (const threshold of [0.015, 0.05]) {
-    const links = run(`set.links('tn93', ${threshold})`, () => set.links('tn93', threshold));
+  for (const [metric, threshold] of [['tn93', 0.015], ['tn93', 0.05], ['hamming', 0.015], ['snps', 15]]) {
+    const links = run(`set.links('${metric}', ${threshold})`, () => set.links(metric, threshold));
     console.log(`${''.padEnd(52)} ${links.length.toLocaleString()} links`);
     links.free();
   }

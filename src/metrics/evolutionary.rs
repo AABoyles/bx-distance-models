@@ -1,6 +1,6 @@
 /// Evolutionary distance models
 use wasm_bindgen::prelude::*;
-use crate::counts::Counts;
+use crate::counts::{Counts, Mismatches};
 use crate::metrics::basic::hamming;
 
 /// Compute Tamura-Nei 93 (TN93) distance between two aligned sequences.
@@ -16,7 +16,7 @@ pub fn tn93_distance(seq1: &str, seq2: &str) -> f64 {
 /// This is a basic but fundamental model used in phylogenetics.
 #[wasm_bindgen]
 pub fn jc69_distance(seq1: &str, seq2: &str) -> f64 {
-    jc69(&Counts::from_strs(seq1, seq2))
+    jc69(&Mismatches::from_strs(seq1, seq2))
 }
 
 /// Compute Kimura 2-Parameter (K2P) distance between two aligned sequences.
@@ -50,7 +50,7 @@ pub(crate) fn tn93(c: &Counts) -> f64 {
     let g_y = g_c + g_t; // pyrimidine frequency
 
     if g_r == 0.0 || g_y == 0.0 {
-        return hamming(c);
+        return hamming(&c.into());
     }
 
     let p1 = c.ts_purine / c.sites;
@@ -73,7 +73,7 @@ pub(crate) fn tn93(c: &Counts) -> f64 {
 
     if term1 <= 0.0 || term2 <= 0.0 || term3 <= 0.0 {
         // Distance is too large for the model; fall back to Hamming
-        return hamming(c);
+        return hamming(&c.into());
     }
 
     let d = -weighted_ln(a1, term1) - weighted_ln(a2, term2) - b * term3.ln();
@@ -81,12 +81,12 @@ pub(crate) fn tn93(c: &Counts) -> f64 {
     d.max(0.0).min(1.0)
 }
 
-pub(crate) fn jc69(c: &Counts) -> f64 {
-    if c.sites == 0.0 {
+pub(crate) fn jc69(m: &Mismatches) -> f64 {
+    if m.sites == 0.0 {
         return 1.0;
     }
 
-    let p = c.mismatches() / c.sites;
+    let p = m.mismatches / m.sites;
 
     // JC69 formula: d = -3/4 * ln(1 - 4/3 * p)
     let arg = 1.0 - (4.0 / 3.0) * p;
@@ -141,7 +141,7 @@ pub(crate) fn tn92(c: &Counts) -> f64 {
     let term3 = 1.0 - q / b_coeff;
 
     if term1 <= 0.0 || term2 <= 0.0 || term3 <= 0.0 {
-        return hamming(c);
+        return hamming(&c.into());
     }
 
     let d = -a_coeff * term1.ln() - c_coeff * term2.ln() - (b_coeff / 2.0 - a_coeff - c_coeff) * term3.ln();

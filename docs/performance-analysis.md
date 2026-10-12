@@ -241,9 +241,8 @@ sparse list of those sites with their 4-bit IUPAC codes, resolved by a slower fa
   sequences without ambiguity codes stay on the fast path in every mode. A first version that
   scanned every word of both sequences for ambiguous sites cost 529 ns/pair here; visiting only
   the stored sites removed that fixed cost.
-- **Hamming/SNP-only metrics** run on the same full counting kernel as TN93 (~150 ns/pair at
-  L = 1,000). A mismatch-only kernel could make them ~3× faster (41 ns/pair in the kernel
-  benchmark); not done yet.
+- **Hamming/SNP-only metrics** ran on the same full counting kernel as TN93 (~150 ns/pair at
+  L = 1,000). They now have their own scan; see [Mismatch-only scan](#mismatch-only-scan).
 
 **Behavior changes that came with the shared encoding:**
 
@@ -257,6 +256,55 @@ sparse list of those sites with their 4-bit IUPAC codes, resolved by a slower fa
 - The legacy batch functions accept every metric name instead of treating anything but `tn93` as
   Hamming (unknown names still fall back to Hamming).
 - `get_distance_index` computes in 64 bits, so large `n` no longer overflows on wasm32.
+
+## Mismatch-only scan
+
+SNPs, Hamming, p-distance and JC69 need only two numbers per pair: compared sites and mismatches.
+They now use a separate scan with 2 `popcount`s per 64 sites instead of about 10:
+
+```text
+v          = valid1 & valid2
+sites     += popcount(v)
+mismatches += popcount(((lo1 ^ lo2) | (hi1 ^ hi2)) & v)
+```
+
+Both scans share the encoding, the ambiguity fallback and the exact early exit. `SequenceSet` picks
+the lighter one whenever every requested metric allows it (so `compute_pairwise_distances_flat_all`,
+which also wants TN93, still scans once with full counts). The single-pair string functions use a
+matching branch-free string kernel.
+
+**`main` vs. this change**, same build settings, alternating runs (n = 1,500, L = 1,000, ns/pair,
+median of 5):
+
+| Call | Before | After | Speedup |
+|---|---:|---:|---:|
+| `distances('hamming')` | 142 | 64 | 2.2× |
+| `distances('snps')` | 151 | 62 | 2.4× |
+| `distances('jc69')` | 187 | 98 | 1.9× |
+| `links('hamming', 0.015)` | 66 | 35 | 1.9× |
+| `links('snps', 15)` | 65 | 28 | 2.3× |
+| `distances('hamming')`, 0.5% R/Y, `'resolve'` | 252 | 173 | 1.5× |
+| `distances('tn93')` (control) | 223 | 222 | — |
+| `links('tn93', 0.015)` (control) | 66 | 62 | — |
+| JS loop over `hamming_distance(a, b)` (n = 400) | ~9,000 | ~9,000 | — |
+
+At n = 4,000 (8 M pairs), dense Hamming takes 0.58 s and SNPs 0.55 s, against 1.85 s for TN93.
+The single-pair functions do not get faster in practice: copying both strings into WASM on every
+call still dominates. JC69 gains less because each pair still pays for one logarithm.
+
+The kernel alone is ~4× cheaper (41 vs. 176 ns/pair in the kernel benchmark); the end-to-end
+gain is ~2× because per-pair overhead (the call, the formula, writing the result) is now a larger
+share.
+
+**A pitfall found on the way.** The first version made TN93 about 30% slower (290 vs. 225 ns/pair)
+and even `transitions`, whose formula is a single addition, 90 ns/pair slower. The kernels and
+formulas compiled to identical code. The difference was in the dense row loop: once `Metric::eval`
+was inlined into it, LLVM hoisted the JC69 and K2P `ln` calls above the metric `match`, so every
+pair computed those logarithms whatever the metric. Rust's `f64::ln` is an LLVM intrinsic that the
+optimizer may execute speculatively, and on `wasm32` each call runs a software `log` (~25–30 ns).
+The same hoisting cost Hamming 25% of its time in the light loop (JC69's `ln`). Keeping
+`Metric::eval` and `Metric::eval_mismatches` out of line (`#[inline(never)]`) fixed both; TN93,
+K2P and the other full-count metrics are back to their previous speed.
 
 ## Reproducing
 

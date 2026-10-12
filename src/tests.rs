@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::counts::Counts;
+    use crate::counts::{Counts, Mismatches};
     use crate::encoding::{Ambiguity, IUPAC};
     use crate::metrics::{self, Metric};
     use crate::sequence_set::{pairs_in_rows, row_splits, Links, SequenceSet};
@@ -392,7 +392,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     fn set_counts(a: &str, b: &str, mode: Ambiguity) -> Counts {
-        SequenceSet::from_strs(&[a, b], mode).counts(0, 1, f64::INFINITY).unwrap()
+        SequenceSet::from_strs(&[a, b], mode).tally::<Counts>(0, 1, f64::INFINITY).unwrap()
     }
 
     #[test]
@@ -441,7 +441,7 @@ mod tests {
         for (a, b) in random_pairs(11, 100, b"ACGTN-RYKMSWBDHV") {
             let set = SequenceSet::from_strs(&[&a, &b], Ambiguity::Skip);
             assert_eq!(set.ambiguous_count(), 0);
-            assert_eq!(set.counts(0, 1, f64::INFINITY).unwrap(), Counts::from_strs(&a, &b));
+            assert_eq!(set.tally::<Counts>(0, 1, f64::INFINITY).unwrap(), Counts::from_strs(&a, &b));
         }
     }
 
@@ -484,7 +484,7 @@ mod tests {
         let seqs = ["ACGTACGTAC", "ACGTTCGTAC", "ACRTACGTAC"];
         let set = SequenceSet::from_strs(&seqs, Ambiguity::Resolve);
         assert_eq!(set.ambiguous_count(), 1);
-        assert_eq!(set.counts(0, 1, f64::INFINITY).unwrap(), Counts::from_strs(seqs[0], seqs[1]));
+        assert_eq!(set.tally::<Counts>(0, 1, f64::INFINITY).unwrap(), Counts::from_strs(seqs[0], seqs[1]));
     }
 
     // ------------------------------------------------------------------
@@ -585,7 +585,7 @@ mod tests {
         // TN93 / JC69 / K2P are never below the p-distance, which is what pruning relies on.
         for (a, b) in random_pairs(31, 600, b"ACGTN-") {
             let c = Counts::from_strs(&a, &b);
-            let p = metrics::basic::hamming(&c);
+            let p = metrics::basic::hamming(&Mismatches::from(&c));
             for metric in [Metric::Tn93, Metric::Jc69, Metric::K2p] {
                 assert!(metric.eval(&c) >= p, "{metric:?}\n{a}\n{b}");
             }
@@ -621,5 +621,46 @@ mod tests {
         assert_eq!(Metric::parse("nope"), None);
         assert_eq!(Ambiguity::parse("Average"), Some(Ambiguity::Average));
         assert_eq!(Ambiguity::parse("ignore"), None);
+    }
+
+    // ------------------------------------------------------------------
+    // Mismatch-only scan (SNPs, Hamming, p-distance, JC69)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn mismatch_string_kernel_matches_full_counts() {
+        for (a, b) in random_pairs(41, 300, b"ACGTN-RYKMSWBDHVacgtuU?.") {
+            assert_eq!(Mismatches::from_strs(&a, &b), Mismatches::from(&Counts::from_strs(&a, &b)), "\n{a}\n{b}");
+        }
+    }
+
+    #[test]
+    fn mismatch_scan_matches_full_counts() {
+        for mode in [Ambiguity::Skip, Ambiguity::Resolve, Ambiguity::Average] {
+            for (a, b) in random_pairs(43, 300, b"ACGTN-RYKMSWBDHVacgt") {
+                let set = SequenceSet::from_strs(&[&a, &b], mode);
+                let got = set.tally::<Mismatches>(0, 1, f64::INFINITY).unwrap();
+                let want = Mismatches::from(&set.tally::<Counts>(0, 1, f64::INFINITY).unwrap());
+                if mode == Ambiguity::Skip {
+                    assert_eq!(got, want, "\n{a}\n{b}");
+                } else {
+                    // Fractional ambiguity contributions are summed in a different order.
+                    let near = |x: f64, y: f64| (x - y).abs() <= 1e-9 * (1.0 + x.abs());
+                    assert!(near(got.sites, want.sites) && near(got.mismatches, want.mismatches), "{mode:?}\n{a}\n{b}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mismatch_only_metrics_use_the_light_dense_path_consistently() {
+        assert!(Metric::Snps.needs_only_mismatches() && Metric::Jc69.needs_only_mismatches());
+        assert!(!Metric::K2p.needs_only_mismatches() && !Metric::Tn93.needs_only_mismatches());
+        let (_, set) = random_set(47, 30, b"ACGTN-", Ambiguity::Skip);
+        let np = 30 * 29 / 2;
+        // [Hamming, Snps] takes the mismatch-only scan; adding TN93 forces the full scan.
+        let light = set.dense(&[Metric::Hamming, Metric::Snps], 0..30);
+        let full = set.dense(&[Metric::Hamming, Metric::Snps, Metric::Tn93], 0..30);
+        assert_eq!(light[..], full[..2 * np]);
     }
 }
