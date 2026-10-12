@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use crate::counts::{Counts, Mismatches};
+    use crate::counts::{Counts, CountsWithGc, Mismatches};
     use crate::encoding::{Ambiguity, IUPAC};
-    use crate::metrics::{self, Metric};
+    use crate::metrics::{self, Metric, Scan};
     use crate::sequence_set::{pairs_in_rows, row_splits, Links, SequenceSet};
 
     #[test]
@@ -331,32 +331,152 @@ mod tests {
         }
     }
 
-    #[test]
-    fn matches_legacy_implementation_bit_for_bit() {
-        let pairs = random_pairs(0x9E3779B97F4A7C15, 600, b"ACGTN-");
-        for (a, b) in &pairs {
-            let set = SequenceSet::from_strs(&[a, b], Ambiguity::Skip);
-            let counts = Counts::from_strs(a, b);
-            for metric in ALL {
-                let want = legacy_eval(metric, a, b);
-                assert!(same(metric.eval(&counts), want), "{metric:?} strings\n{a}\n{b}");
-                assert!(same(set.pair(metric, 0, 1), want), "{metric:?} SequenceSet\n{a}\n{b}");
+    /// Whether `new` agrees with the old implementation's `old` for `metric`. Most metrics are
+    /// unchanged bit for bit, and so are JC69, K2P and TN93 inside their models' range. Beyond
+    /// it, the old code capped them at 1.0 (or returned 1.0, or TN93 fell back to Hamming when
+    /// saturated); now they give the uncapped distance or `Infinity`. TN92 is a different
+    /// formula now (Tamura 1992) and is checked separately.
+    fn agrees_with_legacy(metric: Metric, new: f64, old: f64, old_hamming: f64) -> bool {
+        let corrected = matches!(metric, Metric::Jc69 | Metric::K2p | Metric::Tn93);
+        match metric {
+            Metric::Tn92 => true,
+            _ if corrected && new.is_infinite() => {
+                old == 1.0 || (metric == Metric::Tn93 && same(old, old_hamming))
             }
+            _ if corrected && new >= 1.0 => old == 1.0,
+            _ => same(new, old),
         }
     }
 
     #[test]
-    fn string_functions_match_legacy() {
-        for (a, b) in random_pairs(7, 100, b"ACGTN-") {
-            assert!(same(metrics::basic::snps_distance(&a, &b), legacy::snps(&a, &b)));
-            assert!(same(metrics::basic::hamming_distance(&a, &b), legacy::hamming(&a, &b)));
-            assert!(same(metrics::basic::p_distance(&a, &b), legacy::p_distance(&a, &b)));
-            assert!(same(metrics::evolutionary::tn93_distance(&a, &b), legacy::tn93(&a, &b)));
-            assert!(same(metrics::evolutionary::tn92_distance(&a, &b), legacy::tn92(&a, &b)));
-            assert!(same(metrics::evolutionary::jc69_distance(&a, &b), legacy::jc69(&a, &b)));
-            assert!(same(metrics::evolutionary::k2p_distance(&a, &b), legacy::k2p(&a, &b)));
-            assert!(same(metrics::diagnostics::ts_tv_ratio(&a, &b), legacy::ts_tv(&a, &b)));
+    fn matches_legacy_implementation() {
+        let pairs = random_pairs(0x9E3779B97F4A7C15, 600, b"ACGTN-");
+        let (mut exact, mut beyond_one, mut saturated) = (0, 0, 0);
+        for (a, b) in &pairs {
+            let set = SequenceSet::from_strs(&[a, b], Ambiguity::Skip);
+            let counts = CountsWithGc::from_strs(a, b);
+            let old_hamming = legacy::hamming(a, b);
+            for metric in ALL {
+                let old = legacy_eval(metric, a, b);
+                let new = metric.eval_with_gc(&counts);
+                assert!(agrees_with_legacy(metric, new, old, old_hamming), "{metric:?} {new} vs {old}\n{a}\n{b}");
+                assert!(same(set.pair(metric, 0, 1), new), "{metric:?} SequenceSet\n{a}\n{b}");
+                if matches!(metric, Metric::Jc69 | Metric::K2p | Metric::Tn93) {
+                    match new {
+                        _ if new.is_infinite() => saturated += 1,
+                        _ if new >= 1.0 => beyond_one += 1,
+                        _ => exact += 1,
+                    }
+                }
+            }
         }
+        // The random pairs cover all three regimes of the corrected models.
+        assert!(exact > 500 && beyond_one > 20 && saturated > 20, "{exact} {beyond_one} {saturated}");
+    }
+
+    #[test]
+    fn string_functions_match_legacy() {
+        use metrics::evolutionary::{jc69_distance, k2p_distance, tn93_distance};
+        for (a, b) in random_pairs(7, 100, b"ACGTN-") {
+            let old_hamming = legacy::hamming(&a, &b);
+            assert!(same(metrics::basic::snps_distance(&a, &b), legacy::snps(&a, &b)));
+            assert!(same(metrics::basic::hamming_distance(&a, &b), old_hamming));
+            assert!(same(metrics::basic::p_distance(&a, &b), legacy::p_distance(&a, &b)));
+            assert!(same(metrics::diagnostics::ts_tv_ratio(&a, &b), legacy::ts_tv(&a, &b)));
+            for (metric, new, old) in [
+                (Metric::Tn93, tn93_distance(&a, &b), legacy::tn93(&a, &b)),
+                (Metric::Jc69, jc69_distance(&a, &b), legacy::jc69(&a, &b)),
+                (Metric::K2p, k2p_distance(&a, &b), legacy::k2p(&a, &b)),
+            ] {
+                assert!(agrees_with_legacy(metric, new, old, old_hamming), "{metric:?}\n{a}\n{b}");
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Model ranges and the Tamura (1992) distance
+    // ------------------------------------------------------------------
+
+    fn near(x: f64, y: f64, tol: f64) -> bool {
+        (x.is_infinite() && x == y) || (x - y).abs() <= tol
+    }
+
+    #[test]
+    fn corrected_distances_are_uncapped_and_infinite_when_saturated() {
+        use metrics::evolutionary::{jc69, k2p};
+        let m = |mismatches: f64| Mismatches { sites: 100.0, mismatches };
+        // JC69: p = 0.7 gives 2.031 substitutions per site (the old code returned 1.0)
+        assert!(near(jc69(&m(70.0)), 2.031_04, 1e-5));
+        assert_eq!(jc69(&m(75.0)), f64::INFINITY);
+        assert_eq!(jc69(&m(80.0)), f64::INFINITY);
+        let c = |ts: f64, tv: f64| Counts { sites: 100.0, ts_purine: ts, transversions: tv, ..Counts::default() };
+        // K2P: P = 0.35, Q = 0.25 gives 1.671 (old: 1.0)
+        assert!(near(k2p(&c(35.0, 25.0)), 1.671_15, 1e-5));
+        assert_eq!(k2p(&c(40.0, 25.0)), f64::INFINITY); // 1 - 2P - Q < 0
+        assert_eq!(k2p(&c(0.0, 50.0)), f64::INFINITY); // 1 - 2Q = 0
+    }
+
+    /// 400 sites, every base 100 times in both sequences, with `k` A<->G and `k` C<->T transition
+    /// pairs and `r` transversion pairs of each kind: P = 4k/400, Q = 4r/400, and equal base
+    /// frequencies (G+C content 0.5 in each sequence).
+    fn balanced_pair(k: usize, r: usize) -> (String, String) {
+        let a: Vec<u8> = b"ACGT".repeat(100);
+        let mut b = a.clone();
+        let at = |base: usize, i: usize| 4 * i + base; // A=0 C=1 G=2 T=3
+        for i in 0..k {
+            b[at(0, i)] = b'G';
+            b[at(2, i)] = b'A';
+            b[at(1, i)] = b'T';
+            b[at(3, i)] = b'C';
+        }
+        for i in k..k + r {
+            b[at(0, i)] = b'C';
+            b[at(1, i)] = b'A';
+            b[at(2, i)] = b'T';
+            b[at(3, i)] = b'G';
+        }
+        (String::from_utf8(a).unwrap(), String::from_utf8(b).unwrap())
+    }
+
+    #[test]
+    fn tn93_and_t92_reduce_to_k2p_with_equal_base_frequencies() {
+        use metrics::evolutionary::{k2p_distance, tn92_distance, tn93_distance};
+        // (k, r) -> (P, Q) = (0.3, 0.2), (0.35, 0.25) and (0.4, 0.25): below 1, above 1, saturated
+        for ((k, r), want) in [((30, 20), 0.932_43), ((35, 25), 1.671_15), ((40, 25), f64::INFINITY)] {
+            let (a, b) = balanced_pair(k, r);
+            let k2p = k2p_distance(&a, &b);
+            assert!(near(k2p, want, 1e-5), "K2P {k2p} vs {want}");
+            assert!(near(tn93_distance(&a, &b), k2p, 1e-12), "TN93 at k={k}");
+            assert!(near(tn92_distance(&a, &b), k2p, 1e-12), "T92 at k={k}");
+        }
+    }
+
+    #[test]
+    fn t92_uses_each_sequences_gc_content() {
+        use metrics::evolutionary::{k2p_distance, tn92_distance};
+        // G+C 0.6 vs 0.4; one A<->G and one C<->T difference: P = 0.2, Q = 0
+        let (a, b) = ("GCGCGCAAAT", "GCGCATAAAT");
+        let h: f64 = 0.6 + 0.4 - 2.0 * 0.6 * 0.4;
+        let want = -h * (1.0 - 0.2 / h).ln();
+        assert!(near(tn92_distance(a, b), want, 1e-12), "{} vs {want}", tn92_distance(a, b));
+        assert!(near(tn92_distance(b, a), want, 1e-12));
+        assert!((tn92_distance(a, b) - k2p_distance(a, b)).abs() > 1e-3, "should differ from K2P");
+        // The bit-plane kernel tracks the same per-sequence G+C content as the string kernel.
+        for (x, y) in random_pairs(53, 200, b"ACGTN-") {
+            let set = SequenceSet::from_strs(&[&x, &y], Ambiguity::Skip);
+            assert!(same(set.pair(Metric::Tn92, 0, 1), tn92_distance(&x, &y)), "\n{x}\n{y}");
+        }
+    }
+
+    #[test]
+    fn degenerate_compositions_use_the_limit_of_the_formula() {
+        use metrics::evolutionary::{tn92_distance, tn93_distance};
+        // Only C and T: TN93 keeps just its pyrimidine term, -a2 ln(1 - p2/a2) with a2 = 1/2
+        // (the old code fell back to the Hamming distance, 0.2).
+        let want = -0.5 * (1.0f64 - 0.4).ln();
+        assert!(near(tn93_distance("CCCCCTTTTT", "CCCCTTTTTC"), want, 1e-12));
+        // Only A and T: h = 0, T92 keeps just -1/2 ln(1 - 2Q) with Q = 0.2
+        assert!(near(tn92_distance("AAAAATTTTT", "AAAATTTTTA"), want, 1e-12));
     }
 
     // ------------------------------------------------------------------
@@ -392,7 +512,11 @@ mod tests {
     // ------------------------------------------------------------------
 
     fn set_counts(a: &str, b: &str, mode: Ambiguity) -> Counts {
-        SequenceSet::from_strs(&[a, b], mode).tally::<Counts>(0, 1, f64::INFINITY).unwrap()
+        set_counts_with_gc(a, b, mode).counts
+    }
+
+    fn set_counts_with_gc(a: &str, b: &str, mode: Ambiguity) -> CountsWithGc {
+        SequenceSet::from_strs(&[a, b], mode).tally::<CountsWithGc>(0, 1, f64::INFINITY).unwrap()
     }
 
     #[test]
@@ -441,13 +565,14 @@ mod tests {
         for (a, b) in random_pairs(11, 100, b"ACGTN-RYKMSWBDHV") {
             let set = SequenceSet::from_strs(&[&a, &b], Ambiguity::Skip);
             assert_eq!(set.ambiguous_count(), 0);
+            assert_eq!(set.tally::<CountsWithGc>(0, 1, f64::INFINITY).unwrap(), CountsWithGc::from_strs(&a, &b));
             assert_eq!(set.tally::<Counts>(0, 1, f64::INFINITY).unwrap(), Counts::from_strs(&a, &b));
         }
     }
 
     /// Straightforward per-site reference for the fast kernel + ambiguity fallback.
-    fn reference_counts(a: &str, b: &str, mode: Ambiguity) -> Counts {
-        let mut c = Counts::default();
+    fn reference_counts(a: &str, b: &str, mode: Ambiguity) -> CountsWithGc {
+        let mut c = CountsWithGc::default();
         for (&x, &y) in a.as_bytes().iter().zip(b.as_bytes()) {
             let (cx, cy) = (IUPAC[x as usize], IUPAC[y as usize]);
             let informative = |code: u8| code != 0 && code != 15;
@@ -462,17 +587,19 @@ mod tests {
         c
     }
 
-    fn close(a: &Counts, b: &Counts) -> bool {
-        let near = |x: f64, y: f64| (x - y).abs() <= 1e-9 * (1.0 + x.abs());
+    fn close(x: &CountsWithGc, y: &CountsWithGc) -> bool {
+        let near = |p: f64, q: f64| (p - q).abs() <= 1e-9 * (1.0 + p.abs());
+        let (a, b) = (&x.counts, &y.counts);
         near(a.sites, b.sites) && near(a.ts_purine, b.ts_purine) && near(a.ts_pyrimidine, b.ts_pyrimidine)
             && near(a.transversions, b.transversions) && (0..4).all(|k| near(a.freq[k], b.freq[k]))
+            && near(x.gc1, y.gc1)
     }
 
     #[test]
     fn ambiguity_fallback_matches_per_site_reference() {
         for mode in [Ambiguity::Resolve, Ambiguity::Average] {
             for (a, b) in random_pairs(23, 300, b"ACGTN-RYKMSWBDHVacgtry") {
-                let got = set_counts(&a, &b, mode);
+                let got = set_counts_with_gc(&a, &b, mode);
                 let want = reference_counts(&a, &b, mode);
                 assert!(close(&got, &want), "{mode:?}\n{a}\n{b}\n{got:?}\n{want:?}");
             }
@@ -484,7 +611,7 @@ mod tests {
         let seqs = ["ACGTACGTAC", "ACGTTCGTAC", "ACRTACGTAC"];
         let set = SequenceSet::from_strs(&seqs, Ambiguity::Resolve);
         assert_eq!(set.ambiguous_count(), 1);
-        assert_eq!(set.tally::<Counts>(0, 1, f64::INFINITY).unwrap(), Counts::from_strs(seqs[0], seqs[1]));
+        assert_eq!(set.tally::<CountsWithGc>(0, 1, f64::INFINITY).unwrap(), CountsWithGc::from_strs(seqs[0], seqs[1]));
     }
 
     // ------------------------------------------------------------------
@@ -511,14 +638,16 @@ mod tests {
     #[test]
     fn dense_matches_pairwise_in_triangle_order() {
         let (_, set) = random_set(3, 25, b"ACGTN-", Ambiguity::Skip);
-        let dense = set.dense(&[Metric::Tn93, Metric::Snps], 0..set.len());
+        // Three scan levels in one call: the batch uses the largest (T92's) for all of them.
+        let dense = set.dense(&[Metric::Tn93, Metric::Snps, Metric::Tn92], 0..set.len());
         let np = 25 * 24 / 2;
-        assert_eq!(dense.len(), 2 * np);
+        assert_eq!(dense.len(), 3 * np);
         for i in 0..25 {
             for j in i + 1..25 {
                 let k = crate::pairwise::get_distance_index(i as u32, j as u32, 25) as usize;
                 assert!(same(dense[k], set.pair(Metric::Tn93, i, j)));
                 assert!(same(dense[np + k], set.pair(Metric::Snps, i, j)));
+                assert!(same(dense[2 * np + k], set.pair(Metric::Tn92, i, j)));
             }
         }
     }
@@ -582,12 +711,12 @@ mod tests {
 
     #[test]
     fn pruning_bound_is_exact_on_random_pairs() {
-        // TN93 / JC69 / K2P are never below the p-distance, which is what pruning relies on.
+        // TN93 / T92 / JC69 / K2P are never below the p-distance, which is what pruning relies on.
         for (a, b) in random_pairs(31, 600, b"ACGTN-") {
-            let c = Counts::from_strs(&a, &b);
-            let p = metrics::basic::hamming(&Mismatches::from(&c));
-            for metric in [Metric::Tn93, Metric::Jc69, Metric::K2p] {
-                assert!(metric.eval(&c) >= p, "{metric:?}\n{a}\n{b}");
+            let c = CountsWithGc::from_strs(&a, &b);
+            let p = metrics::basic::hamming(&Mismatches::from(&c.counts));
+            for metric in [Metric::Tn93, Metric::Tn92, Metric::Jc69, Metric::K2p] {
+                assert!(metric.eval_with_gc(&c) >= p, "{metric:?}\n{a}\n{b}");
             }
         }
     }
@@ -654,8 +783,9 @@ mod tests {
 
     #[test]
     fn mismatch_only_metrics_use_the_light_dense_path_consistently() {
-        assert!(Metric::Snps.needs_only_mismatches() && Metric::Jc69.needs_only_mismatches());
-        assert!(!Metric::K2p.needs_only_mismatches() && !Metric::Tn93.needs_only_mismatches());
+        assert!(Metric::Snps.scan() == Scan::Mismatches && Metric::Jc69.scan() == Scan::Mismatches);
+        assert!(Metric::K2p.scan() == Scan::Counts && Metric::Tn93.scan() == Scan::Counts);
+        assert_eq!(Metric::Tn92.scan(), Scan::CountsWithGc);
         let (_, set) = random_set(47, 30, b"ACGTN-", Ambiguity::Skip);
         let np = 30 * 29 / 2;
         // [Hamming, Snps] takes the mismatch-only scan; adding TN93 forces the full scan.

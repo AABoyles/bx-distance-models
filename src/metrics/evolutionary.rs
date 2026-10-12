@@ -1,11 +1,15 @@
 /// Evolutionary distance models
+///
+/// Each returns the expected number of substitutions per site under its model. These distances
+/// are not bounded by 1. When the sequences are too divergent for a model (one of its logarithms
+/// would need a non-positive argument), the distance is `f64::INFINITY`.
 use wasm_bindgen::prelude::*;
-use crate::counts::{Counts, Mismatches};
-use crate::metrics::basic::hamming;
+use crate::counts::{Counts, CountsWithGc, Mismatches};
 
 /// Compute Tamura-Nei 93 (TN93) distance between two aligned sequences.
 /// This is a more sophisticated nucleotide substitution model that accounts
 /// for different rates of transitions and transversions.
+/// Substitutions per site (may exceed 1); `Infinity` when the model saturates.
 #[wasm_bindgen]
 pub fn tn93_distance(seq1: &str, seq2: &str) -> f64 {
     tn93(&Counts::from_strs(seq1, seq2))
@@ -14,6 +18,7 @@ pub fn tn93_distance(seq1: &str, seq2: &str) -> f64 {
 /// Compute Jukes-Cantor (JC69) distance between two aligned sequences.
 /// A simple evolutionary model assuming all substitutions are equally likely.
 /// This is a basic but fundamental model used in phylogenetics.
+/// Substitutions per site (may exceed 1); `Infinity` when p >= 3/4.
 #[wasm_bindgen]
 pub fn jc69_distance(seq1: &str, seq2: &str) -> f64 {
     jc69(&Mismatches::from_strs(seq1, seq2))
@@ -22,16 +27,34 @@ pub fn jc69_distance(seq1: &str, seq2: &str) -> f64 {
 /// Compute Kimura 2-Parameter (K2P) distance between two aligned sequences.
 /// Accounts for different rates of transitions and transversions.
 /// Simpler than TN93 but more accurate than Hamming or JC69.
+/// Substitutions per site (may exceed 1); `Infinity` when the model saturates.
 #[wasm_bindgen]
 pub fn k2p_distance(seq1: &str, seq2: &str) -> f64 {
     k2p(&Counts::from_strs(seq1, seq2))
 }
 
-/// Compute Tajima-Nei 92 (TN92) distance between two aligned sequences.
-/// Similar to TN93 but with a slightly different parameterization.
+/// Compute the Tamura (1992) distance (T92) between two aligned sequences.
+/// Kimura's two-parameter model extended for G+C-content bias, using the G+C content of each
+/// sequence. Exposed as `tn92` for compatibility.
+/// Substitutions per site (may exceed 1); `Infinity` when the model saturates.
 #[wasm_bindgen]
 pub fn tn92_distance(seq1: &str, seq2: &str) -> f64 {
-    tn92(&Counts::from_strs(seq1, seq2))
+    tn92(&CountsWithGc::from_strs(seq1, seq2))
+}
+
+/// `num / den`, taking a 0/0 term of a degenerate base composition as 0, its limit.
+fn ratio(num: f64, den: f64) -> f64 {
+    if den == 0.0 { 0.0 } else { num / den }
+}
+
+/// `weight * ln(term)`, taken as 0 when the weight is 0 (the term drops out of the model).
+fn weighted_ln(weight: f64, term: f64) -> f64 {
+    if weight == 0.0 { 0.0 } else { weight * term.ln() }
+}
+
+/// Whether a log term that is part of the model needs a non-positive argument.
+fn saturated(weight: f64, term: f64) -> bool {
+    weight != 0.0 && term <= 0.0
 }
 
 pub(crate) fn tn93(c: &Counts) -> f64 {
@@ -49,36 +72,26 @@ pub(crate) fn tn93(c: &Counts) -> f64 {
     let g_r = g_a + g_g; // purine frequency
     let g_y = g_c + g_t; // pyrimidine frequency
 
-    if g_r == 0.0 || g_y == 0.0 {
-        return hamming(&c.into());
-    }
-
     let p1 = c.ts_purine / c.sites;
     let p2 = c.ts_pyrimidine / c.sites;
     let q = c.transversions / c.sites;
 
-    // TN93 formula
-    let a1 = (2.0 * g_a * g_g) / g_r;
-    let a2 = (2.0 * g_c * g_t) / g_y;
-    let b = 2.0 * (g_r * g_y - (g_a * g_g * g_y) / g_r - (g_c * g_t * g_r) / g_y);
+    // TN93 formula. If a base, or every purine or every pyrimidine, never occurs, the terms that
+    // involve it are 0/0 (no substitution of that kind is possible either); they drop out.
+    let a1 = ratio(2.0 * g_a * g_g, g_r);
+    let a2 = ratio(2.0 * g_c * g_t, g_y);
+    let b = 2.0 * (g_r * g_y - ratio(g_a * g_g * g_y, g_r) - ratio(g_c * g_t * g_r, g_y));
 
-    // If A or G (C or T) never occurs, a1 (a2) and the matching transition proportion are both
-    // 0, and that term of the formula vanishes: treat 0/0 and 0*ln as 0 rather than NaN.
-    let ratio = |p: f64, a: f64| if a == 0.0 { 0.0 } else { p / a };
-    let weighted_ln = |a: f64, term: f64| if a == 0.0 { 0.0 } else { a * term.ln() };
+    let term1 = 1.0 - ratio(p1, a1) - ratio(q, 2.0 * g_r);
+    let term2 = 1.0 - ratio(p2, a2) - ratio(q, 2.0 * g_y);
+    let term3 = 1.0 - ratio(q, 2.0 * g_r * g_y);
 
-    let term1 = 1.0 - ratio(p1, a1) - q / (2.0 * g_r);
-    let term2 = 1.0 - ratio(p2, a2) - q / (2.0 * g_y);
-    let term3 = 1.0 - q / (2.0 * g_r * g_y);
-
-    if term1 <= 0.0 || term2 <= 0.0 || term3 <= 0.0 {
-        // Distance is too large for the model; fall back to Hamming
-        return hamming(&c.into());
+    if saturated(a1, term1) || saturated(a2, term2) || saturated(b, term3) {
+        return f64::INFINITY;
     }
 
-    let d = -weighted_ln(a1, term1) - weighted_ln(a2, term2) - b * term3.ln();
-
-    d.max(0.0).min(1.0)
+    let d = -weighted_ln(a1, term1) - weighted_ln(a2, term2) - weighted_ln(b, term3);
+    d.max(0.0)
 }
 
 pub(crate) fn jc69(m: &Mismatches) -> f64 {
@@ -91,10 +104,10 @@ pub(crate) fn jc69(m: &Mismatches) -> f64 {
     // JC69 formula: d = -3/4 * ln(1 - 4/3 * p)
     let arg = 1.0 - (4.0 / 3.0) * p;
     if arg <= 0.0 {
-        return 1.0;
+        return f64::INFINITY;
     }
 
-    (-0.75 * arg.ln()).min(1.0).max(0.0)
+    (-0.75 * arg.ln()).max(0.0)
 }
 
 pub(crate) fn k2p(c: &Counts) -> f64 {
@@ -110,40 +123,37 @@ pub(crate) fn k2p(c: &Counts) -> f64 {
     let arg2 = 1.0 - 2.0 * q;
 
     if arg1 <= 0.0 || arg2 <= 0.0 {
-        return 1.0;
+        return f64::INFINITY;
     }
 
     let d = -0.5 * arg1.ln() - 0.25 * arg2.ln();
-    d.min(1.0).max(0.0)
+    d.max(0.0)
 }
 
-pub(crate) fn tn92(c: &Counts) -> f64 {
+pub(crate) fn tn92(gc: &CountsWithGc) -> f64 {
+    let c = &gc.counts;
     if c.sites == 0.0 {
         return 1.0;
     }
 
-    let total2 = c.sites * 2.0;
-    let freq_a_f = c.freq[0] / total2;
-    let freq_c_f = c.freq[1] / total2;
-    let freq_g_f = c.freq[2] / total2;
-    let freq_t_f = c.freq[3] / total2;
-
     let p = c.transitions() / c.sites;
     let q = c.transversions / c.sites;
 
-    // TN92 formula
-    let a_coeff = 2.0 * freq_a_f * freq_g_f;
-    let c_coeff = 2.0 * freq_c_f * freq_t_f;
-    let b_coeff = 2.0 * ((freq_a_f + freq_g_f) * (freq_c_f + freq_t_f));
+    // G+C content of each sequence at the compared sites
+    let theta1 = gc.gc1 / c.sites;
+    let theta2 = (c.freq[1] + c.freq[2] - gc.gc1) / c.sites;
 
-    let term1 = 1.0 - p / a_coeff - q / (2.0 * (freq_a_f + freq_g_f));
-    let term2 = 1.0 - p / c_coeff - q / (2.0 * (freq_c_f + freq_t_f));
-    let term3 = 1.0 - q / b_coeff;
+    // Tamura (1992): d = -h ln(1 - P/h - Q) - (1 - h)/2 ln(1 - 2Q), h = θ1 + θ2 - 2 θ1 θ2.
+    // h = 0 means both sequences are all A/T (or all G/C), so no transition is possible and the
+    // first term drops out.
+    let h = theta1 + theta2 - 2.0 * theta1 * theta2;
+    let term1 = 1.0 - ratio(p, h) - q;
+    let term2 = 1.0 - 2.0 * q;
 
-    if term1 <= 0.0 || term2 <= 0.0 || term3 <= 0.0 {
-        return hamming(&c.into());
+    if saturated(h, term1) || saturated(1.0 - h, term2) {
+        return f64::INFINITY;
     }
 
-    let d = -a_coeff * term1.ln() - c_coeff * term2.ln() - (b_coeff / 2.0 - a_coeff - c_coeff) * term3.ln();
-    d.max(0.0).min(1.0)
+    let d = -weighted_ln(h, term1) - weighted_ln(0.5 * (1.0 - h), term2);
+    d.max(0.0)
 }
