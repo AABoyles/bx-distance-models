@@ -24,7 +24,12 @@ High-performance nucleotide sequence distance calculations compiled to WebAssemb
 - **TN93 (Tamura-Nei 93)**: Sophisticated model accounting for different transition/transversion rates
 - **JC69 (Jukes-Cantor)**: Simple evolutionary distance model
 - **K2P (Kimura 2-Parameter)**: Two-parameter model for transitions and transversions
-- **TN92 (Tamura-Nei 92)**: Earlier variant of the TN93 model
+- **T92 (Tamura 1992)**, as `tn92`: Kimura's two-parameter model extended for G+C-content bias
+
+Evolutionary distances are expected substitutions per site, so they can exceed 1. When two
+sequences are too divergent for a model (one of its logarithms would need a non-positive
+argument, e.g. p ≥ 3/4 for JC69), the distance is `Infinity`; it never falls within a finite
+`links()` threshold.
 
 ### Diagnostics
 - **Transitions Count**: Purine-to-purine (A↔G) and pyrimidine-to-pyrimidine (C↔T) changes
@@ -251,17 +256,21 @@ Returns the simple proportion of nucleotide differences.
 
 ### Evolutionary Models
 
+These return substitutions per site (not capped at 1), or `Infinity` when the model saturates.
+
 #### `tn93_distance(seq1: string, seq2: string) -> number`
-Tamura-Nei 93 distance model (most comprehensive two-parameter model).
+Tamura-Nei 93 distance (separate rates for A↔G, C↔T and transversions; base frequencies from the
+two sequences).
 
 #### `jc69_distance(seq1: string, seq2: string) -> number`
-Jukes-Cantor 69 distance (simple model, assumes equal substitution rates).
+Jukes-Cantor 69 distance (simple model, assumes equal substitution rates). `Infinity` when p ≥ 3/4.
 
 #### `k2p_distance(seq1: string, seq2: string) -> number`
 Kimura 2-parameter distance (accounts for different transition/transversion rates).
 
 #### `tn92_distance(seq1: string, seq2: string) -> number`
-Earlier Tamura-Nei variant for nucleotide sequences.
+Tamura (1992) distance, often called T92: d = −h·ln(1 − P/h − Q) − ½(1 − h)·ln(1 − 2Q), with
+h = θ₁ + θ₂ − 2θ₁θ₂ from the G+C content θ of each sequence. Equals K2P when both are 50% G+C.
 
 ### Diagnostics
 
@@ -398,7 +407,7 @@ bx-distance-models/
 - **Use `SequenceSet` for many sequences**: it encodes once and avoids per-pair objects and string copies. Calling the single-pair functions in a JS loop copies both sequences into WASM on every call.
 - **Use `links()` with a threshold when you only need close pairs**: far-apart pairs stop early, and the output stays small. A full matrix for 10,000 sequences is 50 M distances (400 MB).
 - **Split big jobs**: row ranges let you report progress or spread the work across Web Workers (`row_splits`).
-- **SNPs, Hamming, p-distance and JC69 are cheapest**: they only need mismatch counts, so `SequenceSet` computes them 2–3× faster than TN93, TN92, K2P and the Ts/Tv metrics, which need full counts
+- **SNPs, Hamming, p-distance and JC69 are cheapest**: they only need mismatch counts, so `SequenceSet` computes them 2–3× faster than TN93, T92, K2P and the Ts/Tv metrics, which need full counts
 - **Sequence Length**: Performance scales linearly with sequence length
 - **Memory**: about 3 bits per site per sequence once encoded (sequences that use the ambiguity fallback add 1 bit per site plus 5 bytes per ambiguous site); call `free()` on `SequenceSet` and `Links` when done
 - **Optimized Release Build**: Always use `npm run build:release` for production deployments

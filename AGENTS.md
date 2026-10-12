@@ -20,7 +20,7 @@ bx-distance-models/
 │   ├── metrics/
 │   │   ├── mod.rs                # Module declarations
 │   │   ├── basic.rs              # SNPs, Hamming, P-distance
-│   │   ├── evolutionary.rs       # TN93, JC69, K2P, TN92
+│   │   ├── evolutionary.rs       # TN93, JC69, K2P, T92 (as tn92)
 │   │   └── diagnostics.rs        # Transitions/transversions/ratios
 │   └── tests.rs                  # Unit tests (incl. bit-for-bit check against the old kernels)
 ├── tests/node/smoke.mjs          # JS binding checks against a Node build (npm run test:node)
@@ -54,25 +54,31 @@ bx-distance-models/
 ### `counts.rs` - Counting Kernels
 - `Counts { sites, ts_purine, ts_pyrimidine, transversions, freq: [A, C, G, T] }` (f64; fractional with ambiguity)
 - `Mismatches { sites, mismatches }`: all that SNPs, Hamming, p-distance and JC69 need
+- `CountsWithGc { counts, gc1 }`: `Counts` plus the first sequence's G+C count, which only T92 needs.
+  Keep `Counts` itself at 64 bytes (8 × f64): a larger struct is copied with `memory.copy`, a
+  runtime call in V8, and an extra field cost every full-count metric 5-9%
 - **Every metric is a function of `Counts`** (the light ones also of `Mismatches`), so each pair is
   scanned once whatever the metric
-- `Tally` trait (`Counts`, `Mismatches`): `count_planes()` bit-plane kernel, ~10 `popcount`s per 64
-  sites for `Counts`, 2 for `Mismatches`; optional early exit on a mismatch bound
-- `Counts::from_strs()` / `Mismatches::from_strs()` → string kernels for the single-pair functions
-  (no branches on bases)
+- `Tally` trait (`Mismatches`, `Counts`, `CountsWithGc`): `count_planes()` bit-plane kernel, 2 /
+  ~10 / ~11 `popcount`s per 64 sites; optional early exit on a mismatch bound
+- `Counts::from_strs()` / `CountsWithGc::from_strs()` / `Mismatches::from_strs()` → string kernels
+  for the single-pair functions (no branches on bases)
 - `Resolutions` + `add_ambiguous_sites()` → ambiguity fallback, visiting only the sparse ambiguous sites
 - `count_pair::<T>()` → fast kernel, plus the fallback when either sequence carries ambiguity codes
 
 ### `metrics/*.rs` - Metric Formulas
 - Each metric has a `pub(crate) fn name(c: &Counts) -> f64` formula (`&Mismatches` for SNPs,
-  Hamming/p-distance and JC69) and a `#[wasm_bindgen]` string wrapper (`name_distance(seq1, seq2)`
-  etc.) that calls it via `Counts::from_strs` / `Mismatches::from_strs`
+  Hamming/p-distance and JC69, `&CountsWithGc` for T92) and a `#[wasm_bindgen]` string wrapper
+  (`name_distance(seq1, seq2)` etc.) that calls it via the matching `from_strs`
 - `basic.rs`: SNPs (count), Hamming / p-distance (identical, proportion [0, 1])
-- `evolutionary.rs`: TN93, JC69, K2P, TN92
+- `evolutionary.rs`: TN93, JC69, K2P, T92 (Tamura 1992, exposed as `tn92`). Uncapped
+  substitutions per site; `f64::INFINITY` when a log argument would be non-positive. Zero-weight
+  terms of degenerate base compositions drop out (`ratio`/`weighted_ln`) instead of becoming NaN
 - `diagnostics.rs`: transitions, transversions, Ts/Tv ratio
-- `mod.rs`: `Metric` enum → `parse()` (names accepted from JS), `eval()` / `eval_mismatches()`,
-  `needs_only_mismatches()` (picks the light scan), and `mismatch_bound()` for early exit (only
-  metrics provably >= p-distance, plus SNPs)
+- `mod.rs`: `Metric` enum → `parse()` (names accepted from JS), `scan()` (the cheapest `Scan` that
+  serves it: `Mismatches` < `Counts` < `CountsWithGc`), `eval()` / `eval_mismatches()` /
+  `eval_with_gc()`, and `mismatch_bound()` for early exit (only metrics provably >= p-distance,
+  plus SNPs). `eval()` panics for T92, which must go through `eval_with_gc()`
 
 ### `sequence_set.rs` - Batch API
 - `SequenceSet::new(seqs, ambiguity?)` encodes once; `distances()` (dense, typed array), `links()`
@@ -118,8 +124,10 @@ bx-distance-models/
 
 ### Return Types
 - Counts: `f64` (for JS interop consistency)
-- Proportions/distances: `f64` [0, 1]
-- Edge cases return `1.0` (max distance) or `0.0` (identical)
+- Proportions (Hamming, p-distance): `f64` [0, 1]
+- Evolutionary distances (TN93, JC69, K2P, T92): substitutions per site, `f64` >= 0 and not capped;
+  `Infinity` when the model saturates
+- No compared sites at all: `1.0` for every distance (`0.0` for SNPs)
 
 ## Build System
 
@@ -156,11 +164,12 @@ src/*.rs → wasm-pack → pkg/
 1. Write `pub(crate) fn new_metric(c: &Counts) -> f64` in the fitting `metrics/*.rs` file (or take
    `&Mismatches` if compared sites and mismatches are all it needs), plus a `#[wasm_bindgen]`
    string wrapper calling it with `Counts::from_strs` / `Mismatches::from_strs`
-2. Add a `Metric` variant in `metrics/mod.rs`: `parse()` name(s), `eval()`, `METRIC_NAMES`; for a
-   mismatch-only metric also `eval_mismatches()` and `needs_only_mismatches()`; and a
+2. Add a `Metric` variant in `metrics/mod.rs`: `parse()` name(s), `scan()`, `eval()` (or
+   `eval_mismatches()` / `eval_with_gc()` for the other scan levels), `METRIC_NAMES`; and a
    `mismatch_bound()` arm **only** if the metric is provably never below the p-distance (otherwise
    pruning would drop valid links)
-3. If it needs more than `Counts` provides, extend `Counts` and all three kernels in `counts.rs`
+3. If it needs more than `Counts` provides, add a new `Tally` type (like `CountsWithGc`) and `Scan`
+   level rather than growing `Counts` (see the 64-byte note above), and measure the dense path
 4. Add tests in `tests.rs`; `ALL` in the tests lists every metric
 5. Rebuild: `npm run build:release`
 
@@ -197,8 +206,6 @@ src/*.rs → wasm-pack → pkg/
 - Sequences compared up to length of shorter sequence
 - No support for protein sequences
 - RNA is read as DNA (U = T); no protein support
-- TN93 distance can be unreliable for very high divergence (p > 0.75)
+- Evolutionary distances grow quickly near saturation and become `Infinity` beyond it
 - Batch operations O(n²) - use `links()` with a threshold, row ranges, or Web Workers for large sets
 - A dense matrix must fit in 32-bit WASM memory (about 500 M distances); `distances()` errors beyond that
-- `tn92_distance` does not follow the Tamura (1992) GC-content formulation (unchanged, see docs/performance-analysis.md)
-- TN93/JC69/K2P clamp to [0, 1] and fall back when saturated (unchanged)

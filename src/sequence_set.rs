@@ -4,9 +4,9 @@ use std::ops::Range;
 use js_sys::{Float64Array, Uint32Array};
 use wasm_bindgen::prelude::*;
 
-use crate::counts::{count_pair, Counts, Mismatches, Resolutions, Tally};
+use crate::counts::{count_pair, Counts, CountsWithGc, Mismatches, Resolutions, Tally};
 use crate::encoding::{Ambiguity, Encoded};
-use crate::metrics::{Metric, METRIC_NAMES};
+use crate::metrics::{Metric, Scan, METRIC_NAMES};
 
 /// A set of aligned nucleotide sequences, encoded once for fast pairwise comparison.
 ///
@@ -142,13 +142,13 @@ impl SequenceSet {
         count_pair(&self.seqs[i], &self.seqs[j], self.resolutions.as_ref(), max_mismatches)
     }
 
-    /// `metric` for pair (i, j), from the mismatch-only scan when the metric allows it.
+    /// `metric` for pair (i, j), from the cheapest scan that serves it.
     /// `None` if the pair has more than `max_mismatches` mismatches.
     fn eval(&self, metric: Metric, i: usize, j: usize, max_mismatches: f64) -> Option<f64> {
-        if metric.needs_only_mismatches() {
-            self.tally::<Mismatches>(i, j, max_mismatches).map(|m| metric.eval_mismatches(&m))
-        } else {
-            self.tally::<Counts>(i, j, max_mismatches).map(|c| metric.eval(&c))
+        match metric.scan() {
+            Scan::Mismatches => self.tally::<Mismatches>(i, j, max_mismatches).map(|m| metric.eval_mismatches(&m)),
+            Scan::Counts => self.tally::<Counts>(i, j, max_mismatches).map(|c| metric.eval(&c)),
+            Scan::CountsWithGc => self.tally::<CountsWithGc>(i, j, max_mismatches).map(|c| metric.eval_with_gc(&c)),
         }
     }
 
@@ -173,15 +173,15 @@ impl SequenceSet {
         let total = pairs_in_rows(n, rows.clone()) as usize;
         let mut row = Vec::new();
         let mut offset = 0;
-        // One scan per pair for all metrics: the mismatch-only scan if it serves every one.
-        let mismatches_only = metrics.iter().all(|m| m.needs_only_mismatches());
+        // One scan per pair for all metrics: the cheapest one that serves every one of them.
+        let scan = metrics.iter().map(|m| m.scan()).max().unwrap_or(Scan::Mismatches);
         for i in rows {
             let width = n - 1 - i;
             row.resize(width * metrics.len(), 0.0);
-            if mismatches_only {
-                self.fill_row::<Mismatches>(i, metrics, &mut row, Metric::eval_mismatches);
-            } else {
-                self.fill_row::<Counts>(i, metrics, &mut row, Metric::eval);
+            match scan {
+                Scan::Mismatches => self.fill_row::<Mismatches>(i, metrics, &mut row, Metric::eval_mismatches),
+                Scan::Counts => self.fill_row::<Counts>(i, metrics, &mut row, Metric::eval),
+                Scan::CountsWithGc => self.fill_row::<CountsWithGc>(i, metrics, &mut row, Metric::eval_with_gc),
             }
             for m in 0..metrics.len() {
                 sink(m * total + offset, &row[m * width..(m + 1) * width]);
@@ -228,10 +228,10 @@ impl SequenceSet {
 
     pub(crate) fn sparse(&self, metric: Metric, threshold: f64, rows: Range<usize>) -> Links {
         // Pick the scan once, not per pair.
-        if metric.needs_only_mismatches() {
-            self.sparse_with::<Mismatches>(metric, threshold, rows, Metric::eval_mismatches)
-        } else {
-            self.sparse_with::<Counts>(metric, threshold, rows, Metric::eval)
+        match metric.scan() {
+            Scan::Mismatches => self.sparse_with::<Mismatches>(metric, threshold, rows, Metric::eval_mismatches),
+            Scan::Counts => self.sparse_with::<Counts>(metric, threshold, rows, Metric::eval),
+            Scan::CountsWithGc => self.sparse_with::<CountsWithGc>(metric, threshold, rows, Metric::eval_with_gc),
         }
     }
 

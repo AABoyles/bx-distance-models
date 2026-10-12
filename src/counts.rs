@@ -19,6 +19,18 @@ pub struct Counts {
     pub freq: [f64; 4],
 }
 
+/// [`Counts`] plus the G+C content of the first sequence, which only T92 needs.
+///
+/// Kept out of `Counts` on purpose: tracking it in every full scan cost the other full-count
+/// metrics 10-25% (one more accumulator in the hot loop), and even an unused field cost 5-9%,
+/// because a struct over 64 bytes is copied with `memory.copy`, a runtime call in V8.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CountsWithGc {
+    pub counts: Counts,
+    /// G or C in the first sequence at compared sites (the second's is `freq[C] + freq[G] - gc1`).
+    pub gc1: f64,
+}
+
 impl Counts {
     #[inline]
     pub fn transitions(&self) -> f64 {
@@ -32,22 +44,7 @@ impl Counts {
 
     /// Counts two strings site by site, up to the shorter length, skipping non-bases.
     pub fn from_strs(seq1: &str, seq2: &str) -> Counts {
-        // 5x5 matrix indexed by base (A C G T, 4 = not a base): one indexed increment per
-        // site, no data-dependent branches.
-        let mut m = [0u32; 32];
-        for (&a, &b) in seq1.as_bytes().iter().zip(seq2.as_bytes()) {
-            m[(BASE[a as usize] as usize * 5 + BASE[b as usize] as usize) & 31] += 1;
-        }
-        let mut c = Counts::default();
-        for x in 0..4 {
-            for y in 0..4 {
-                let n = m[x * 5 + y];
-                if n != 0 {
-                    c.add(x, y, n as f64);
-                }
-            }
-        }
-        c
+        CountsWithGc::from_strs(seq1, seq2).counts
     }
 
     /// Adds `w` sites where sequence 1 holds base `x` and sequence 2 holds base `y`.
@@ -75,6 +72,37 @@ impl Counts {
         self.transversions += other.transversions;
         for (f, o) in self.freq.iter_mut().zip(other.freq) {
             *f += o;
+        }
+    }
+}
+
+impl CountsWithGc {
+    /// Counts two strings site by site, up to the shorter length, skipping non-bases.
+    pub fn from_strs(seq1: &str, seq2: &str) -> CountsWithGc {
+        // 5x5 matrix indexed by base (A C G T, 4 = not a base): one indexed increment per
+        // site, no data-dependent branches.
+        let mut m = [0u32; 32];
+        for (&a, &b) in seq1.as_bytes().iter().zip(seq2.as_bytes()) {
+            m[(BASE[a as usize] as usize * 5 + BASE[b as usize] as usize) & 31] += 1;
+        }
+        let mut c = CountsWithGc::default();
+        for x in 0..4 {
+            for y in 0..4 {
+                let n = m[x * 5 + y];
+                if n != 0 {
+                    c.add(x, y, n as f64);
+                }
+            }
+        }
+        c
+    }
+
+    /// Adds `w` sites where sequence 1 holds base `x` and sequence 2 holds base `y`.
+    #[inline]
+    pub fn add(&mut self, x: usize, y: usize, w: f64) {
+        self.counts.add(x, y, w);
+        if matches!(x, 1 | 2) {
+            self.gc1 += w;
         }
     }
 
@@ -131,11 +159,11 @@ fn bases(code: u8) -> impl Iterator<Item = usize> {
 
 /// What one site contributes for every pair of IUPAC codes under one ambiguity mode, built once
 /// per `SequenceSet` so the per-site work in the fallback is a lookup and eight additions.
-pub(crate) struct Resolutions(Box<[Counts; 256]>);
+pub(crate) struct Resolutions(Box<[CountsWithGc; 256]>);
 
 impl Resolutions {
     pub fn new(mode: Ambiguity) -> Self {
-        let mut table = Box::new([Counts::default(); 256]);
+        let mut table = Box::new([CountsWithGc::default(); 256]);
         // Codes 0 (not a base) and 15 (N) are never compared.
         for c1 in 1..15u8 {
             for c2 in 1..15u8 {
@@ -146,7 +174,7 @@ impl Resolutions {
     }
 
     #[inline]
-    fn get(&self, c1: u8, c2: u8) -> &Counts {
+    fn get(&self, c1: u8, c2: u8) -> &CountsWithGc {
         &self.0[(c1 as usize) << 4 | c2 as usize]
     }
 }
@@ -169,15 +197,15 @@ pub(crate) trait Tally: Sized {
     fn count_planes(x: &[Word], y: &[Word], max_mismatches: f64) -> Option<Self>;
 
     /// Adds what one resolved ambiguous site contributes.
-    fn add_resolved(&mut self, site: &Counts);
+    fn add_resolved(&mut self, site: &CountsWithGc);
 }
 
-impl Tally for Counts {
-    /// ~10 popcounts per 64 sites.
-    #[inline(never)]
-    fn count_planes(x: &[Word], y: &[Word], max_mismatches: f64) -> Option<Counts> {
+impl Counts {
+    /// The full bit-plane scan, ~10 popcounts per 64 sites (+1 for `gc1` with `GC`).
+    #[inline(always)]
+    fn scan_planes<const GC: bool>(x: &[Word], y: &[Word], max_mismatches: f64) -> Option<CountsWithGc> {
         let (mut sites, mut tv, mut ts, mut ts_y) = (0u32, 0u32, 0u32, 0u32);
-        let (mut lo_n, mut hi_n, mut t_n) = (0u32, 0u32, 0u32);
+        let (mut lo_n, mut hi_n, mut t_n, mut gc1) = (0u32, 0u32, 0u32, 0u32);
         let len = x.len().min(y.len());
         for (cx, cy) in x[..len].chunks(CHUNK).zip(y[..len].chunks(CHUNK)) {
             for (a, b) in cx.iter().zip(cy) {
@@ -193,6 +221,9 @@ impl Tally for Counts {
                 lo_n += (v & lo1).count_ones() + (v & lo2).count_ones();
                 hi_n += (v & hi1).count_ones() + (v & hi2).count_ones();
                 t_n += (v & lo1 & hi1).count_ones() + (v & lo2 & hi2).count_ones();
+                if GC {
+                    gc1 += (v & (lo1 ^ hi1)).count_ones(); // C = 01, G = 10
+                }
             }
             if (ts + tv) as f64 > max_mismatches {
                 return None;
@@ -201,18 +232,39 @@ impl Tally for Counts {
         // lo = C or T, hi = G or T, lo & hi = T
         let (c, g, t) = (lo_n - t_n, hi_n - t_n, t_n);
         let a = 2 * sites - lo_n - g;
-        Some(Counts {
+        let counts = Counts {
             sites: sites as f64,
             ts_purine: (ts - ts_y) as f64,
             ts_pyrimidine: ts_y as f64,
             transversions: tv as f64,
             freq: [a as f64, c as f64, g as f64, t as f64],
-        })
+        };
+        Some(CountsWithGc { counts, gc1: gc1 as f64 })
+    }
+}
+
+impl Tally for Counts {
+    #[inline(never)]
+    fn count_planes(x: &[Word], y: &[Word], max_mismatches: f64) -> Option<Counts> {
+        Counts::scan_planes::<false>(x, y, max_mismatches).map(|c| c.counts)
     }
 
     #[inline]
-    fn add_resolved(&mut self, site: &Counts) {
-        self.add_counts(site);
+    fn add_resolved(&mut self, site: &CountsWithGc) {
+        self.add_counts(&site.counts);
+    }
+}
+
+impl Tally for CountsWithGc {
+    #[inline(never)]
+    fn count_planes(x: &[Word], y: &[Word], max_mismatches: f64) -> Option<CountsWithGc> {
+        Counts::scan_planes::<true>(x, y, max_mismatches)
+    }
+
+    #[inline]
+    fn add_resolved(&mut self, site: &CountsWithGc) {
+        self.counts.add_counts(&site.counts);
+        self.gc1 += site.gc1;
     }
 }
 
@@ -238,9 +290,9 @@ impl Tally for Mismatches {
     }
 
     #[inline]
-    fn add_resolved(&mut self, site: &Counts) {
-        self.sites += site.sites;
-        self.mismatches += site.mismatches();
+    fn add_resolved(&mut self, site: &CountsWithGc) {
+        self.sites += site.counts.sites;
+        self.mismatches += site.counts.mismatches();
     }
 }
 

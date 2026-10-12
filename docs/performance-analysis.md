@@ -201,7 +201,8 @@ that actually contain ambiguities, resolving those (rare) sites in a separate fi
 - **Unrelated to speed, worth checking before locking in tests:** `tn92_distance` does not match the
   Tamura (1992) formula, which is parameterized by GC content. TN93 also caps distances at 1.0 and
   falls back to the p-distance when the model saturates, so the most divergent pairs can report a
-  smaller distance than moderately divergent ones.
+  smaller distance than moderately divergent ones. (Both since fixed; see
+  [Model corrections](#model-corrections).)
 
 ## After the optimizations
 
@@ -305,6 +306,28 @@ optimizer may execute speculatively, and on `wasm32` each call runs a software `
 The same hoisting cost Hamming 25% of its time in the light loop (JC69's `ln`). Keeping
 `Metric::eval` and `Metric::eval_mismatches` out of line (`#[inline(never)]`) fixed both; TN93,
 K2P and the other full-count metrics are back to their previous speed.
+
+## Model corrections
+
+`tn92_distance` now computes the Tamura (1992) distance, d = −h·ln(1 − P/h − Q) − ½(1 − h)·ln(1 − 2Q)
+with h = θ₁ + θ₂ − 2θ₁θ₂ from each sequence's G+C content. TN93, JC69, K2P and T92 are no longer
+capped at 1.0: they are substitutions per site, and become `Infinity` when a logarithm's argument
+would be non-positive (instead of falling back to the p-distance or 1.0). Terms that vanish for a
+degenerate base composition (no purines, or only A/T) drop out at their limit instead of falling
+back to the p-distance. All four remain ≥ the p-distance, so `links()` keeps its exact early exit,
+now for T92 too.
+
+Two performance notes from the change:
+
+- **Per-sequence G+C content costs only T92.** Tracking it in the full-count scan needs one more
+  popcount and accumulator per 64 sites; always on, that made TN93, K2P and `transitions` 10–25%
+  slower. It is now a separate scan level that only T92 selects (T92: 213 → 246 ns/pair; the other
+  metrics are unchanged).
+- **Keep `Counts` at 64 bytes.** Even with the extra accumulator removed, an unused 9th `f64` field
+  cost the full-count metrics 5–9% (medians of 10 interleaved runs). Past 64 bytes, the struct is
+  copied with `memory.copy`, which V8 runs as a runtime call, in the per-pair path (14 such copies
+  in `dense_js`, against none before). The G+C count therefore lives in a separate
+  `CountsWithGc` type.
 
 ## Reproducing
 
