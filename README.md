@@ -398,6 +398,7 @@ bx-distance-models/
 - **Use `SequenceSet` for many sequences**: it encodes once and avoids per-pair objects and string copies. Calling the single-pair functions in a JS loop copies both sequences into WASM on every call.
 - **Use `links()` with a threshold when you only need close pairs**: far-apart pairs stop early, and the output stays small. A full matrix for 10,000 sequences is 50 M distances (400 MB).
 - **Split big jobs**: row ranges let you report progress or spread the work across Web Workers (`row_splits`).
+- **SNPs, Hamming, p-distance and JC69 are cheapest**: they only need mismatch counts, so `SequenceSet` computes them 2–3× faster than TN93, TN92, K2P and the Ts/Tv metrics, which need full counts
 - **Sequence Length**: Performance scales linearly with sequence length
 - **Memory**: about 3 bits per site per sequence once encoded (sequences that use the ambiguity fallback add 1 bit per site plus 5 bytes per ambiguous site); call `free()` on `SequenceSet` and `Links` when done
 - **Optimized Release Build**: Always use `npm run build:release` for production deployments

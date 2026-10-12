@@ -53,20 +53,26 @@ bx-distance-models/
 
 ### `counts.rs` - Counting Kernels
 - `Counts { sites, ts_purine, ts_pyrimidine, transversions, freq: [A, C, G, T] }` (f64; fractional with ambiguity)
-- **Every metric is a function of `Counts`**, so each pair is scanned once whatever the metric
-- `Counts::from_strs()` → string kernel for the single-pair functions (5×5 count table, no branches on bases)
-- `count_planes()` → bit-plane kernel, ~10 `popcount`s per 64 sites; optional early exit on a mismatch bound
+- `Mismatches { sites, mismatches }`: all that SNPs, Hamming, p-distance and JC69 need
+- **Every metric is a function of `Counts`** (the light ones also of `Mismatches`), so each pair is
+  scanned once whatever the metric
+- `Tally` trait (`Counts`, `Mismatches`): `count_planes()` bit-plane kernel, ~10 `popcount`s per 64
+  sites for `Counts`, 2 for `Mismatches`; optional early exit on a mismatch bound
+- `Counts::from_strs()` / `Mismatches::from_strs()` → string kernels for the single-pair functions
+  (no branches on bases)
 - `Resolutions` + `add_ambiguous_sites()` → ambiguity fallback, visiting only the sparse ambiguous sites
-- `count_pair()` → fast kernel, plus the fallback when either sequence carries ambiguity codes
+- `count_pair::<T>()` → fast kernel, plus the fallback when either sequence carries ambiguity codes
 
 ### `metrics/*.rs` - Metric Formulas
-- Each metric has a `pub(crate) fn name(c: &Counts) -> f64` formula and a `#[wasm_bindgen]`
-  string wrapper (`name_distance(seq1, seq2)` etc.) that calls it via `Counts::from_strs`
+- Each metric has a `pub(crate) fn name(c: &Counts) -> f64` formula (`&Mismatches` for SNPs,
+  Hamming/p-distance and JC69) and a `#[wasm_bindgen]` string wrapper (`name_distance(seq1, seq2)`
+  etc.) that calls it via `Counts::from_strs` / `Mismatches::from_strs`
 - `basic.rs`: SNPs (count), Hamming / p-distance (identical, proportion [0, 1])
 - `evolutionary.rs`: TN93, JC69, K2P, TN92
 - `diagnostics.rs`: transitions, transversions, Ts/Tv ratio
-- `mod.rs`: `Metric` enum → `parse()` (names accepted from JS), `eval()`, and `mismatch_bound()`
-  for early exit (only metrics provably >= p-distance, plus SNPs)
+- `mod.rs`: `Metric` enum → `parse()` (names accepted from JS), `eval()` / `eval_mismatches()`,
+  `needs_only_mismatches()` (picks the light scan), and `mismatch_bound()` for early exit (only
+  metrics provably >= p-distance, plus SNPs)
 
 ### `sequence_set.rs` - Batch API
 - `SequenceSet::new(seqs, ambiguity?)` encodes once; `distances()` (dense, typed array), `links()`
@@ -99,9 +105,13 @@ bx-distance-models/
 ### Performance Optimizations
 - Encode once, compare many times: 3 bits per site, 64 sites per `u64` word
 - No data-dependent branches in the hot loops (bases are random, so branches on them mispredict)
-- One scan per pair for all metrics
+- One scan per pair for all metrics, and a lighter scan when every requested metric needs only
+  mismatches
 - Exact early exit for thresholded output (`Metric::mismatch_bound`)
 - `count_planes` is `#[inline(never)]` so V8 can tier it up during one long batch call
+- `Metric::eval` / `eval_mismatches` are `#[inline(never)]`: inlined into the row loop, LLVM
+  hoisted the formulas' `ln` calls (a speculatable intrinsic) above the metric `match`, so every
+  pair paid for every metric's logarithms. Check the dense path's speed after touching them
 - No JS objects or string copies per pair in the batch API
 - Measured in `docs/performance-analysis.md`; `+simd128` was slower, so it is not enabled
 - `#[profile.release]` uses `opt-level = 3, lto = true`
@@ -143,9 +153,11 @@ src/*.rs → wasm-pack → pkg/
 ## Common Tasks for Agents
 
 ### Adding a New Distance Metric
-1. Write `pub(crate) fn new_metric(c: &Counts) -> f64` in the fitting `metrics/*.rs` file, plus a
-   `#[wasm_bindgen]` string wrapper calling it with `Counts::from_strs`
-2. Add a `Metric` variant in `metrics/mod.rs`: `parse()` name(s), `eval()`, `METRIC_NAMES`, and a
+1. Write `pub(crate) fn new_metric(c: &Counts) -> f64` in the fitting `metrics/*.rs` file (or take
+   `&Mismatches` if compared sites and mismatches are all it needs), plus a `#[wasm_bindgen]`
+   string wrapper calling it with `Counts::from_strs` / `Mismatches::from_strs`
+2. Add a `Metric` variant in `metrics/mod.rs`: `parse()` name(s), `eval()`, `METRIC_NAMES`; for a
+   mismatch-only metric also `eval_mismatches()` and `needs_only_mismatches()`; and a
    `mismatch_bound()` arm **only** if the metric is provably never below the p-distance (otherwise
    pruning would drop valid links)
 3. If it needs more than `Counts` provides, extend `Counts` and all three kernels in `counts.rs`

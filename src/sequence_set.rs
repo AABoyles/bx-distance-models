@@ -4,7 +4,7 @@ use std::ops::Range;
 use js_sys::{Float64Array, Uint32Array};
 use wasm_bindgen::prelude::*;
 
-use crate::counts::{count_pair, Counts, Resolutions};
+use crate::counts::{count_pair, Counts, Mismatches, Resolutions, Tally};
 use crate::encoding::{Ambiguity, Encoded};
 use crate::metrics::{Metric, METRIC_NAMES};
 
@@ -136,14 +136,24 @@ impl SequenceSet {
         self.seqs.len()
     }
 
+    /// Scans pair (i, j); `None` if it has more than `max_mismatches` mismatches.
     #[inline]
-    pub(crate) fn counts(&self, i: usize, j: usize, max_mismatches: f64) -> Option<Counts> {
+    pub(crate) fn tally<T: Tally>(&self, i: usize, j: usize, max_mismatches: f64) -> Option<T> {
         count_pair(&self.seqs[i], &self.seqs[j], self.resolutions.as_ref(), max_mismatches)
     }
 
+    /// `metric` for pair (i, j), from the mismatch-only scan when the metric allows it.
+    /// `None` if the pair has more than `max_mismatches` mismatches.
+    fn eval(&self, metric: Metric, i: usize, j: usize, max_mismatches: f64) -> Option<f64> {
+        if metric.needs_only_mismatches() {
+            self.tally::<Mismatches>(i, j, max_mismatches).map(|m| metric.eval_mismatches(&m))
+        } else {
+            self.tally::<Counts>(i, j, max_mismatches).map(|c| metric.eval(&c))
+        }
+    }
+
     pub(crate) fn pair(&self, metric: Metric, i: usize, j: usize) -> f64 {
-        let c = self.counts(i, j, f64::INFINITY).expect("an unbounded scan always completes");
-        metric.eval(&c)
+        self.eval(metric, i, j, f64::INFINITY).expect(UNBOUNDED)
     }
 
     fn row_range(&self, start: Option<u32>, end: Option<u32>) -> Result<Range<usize>, String> {
@@ -163,19 +173,31 @@ impl SequenceSet {
         let total = pairs_in_rows(n, rows.clone()) as usize;
         let mut row = Vec::new();
         let mut offset = 0;
+        // One scan per pair for all metrics: the mismatch-only scan if it serves every one.
+        let mismatches_only = metrics.iter().all(|m| m.needs_only_mismatches());
         for i in rows {
             let width = n - 1 - i;
             row.resize(width * metrics.len(), 0.0);
-            for j in i + 1..n {
-                let c = self.counts(i, j, f64::INFINITY).expect("an unbounded scan always completes");
-                for (m, metric) in metrics.iter().enumerate() {
-                    row[m * width + (j - i - 1)] = metric.eval(&c);
-                }
+            if mismatches_only {
+                self.fill_row::<Mismatches>(i, metrics, &mut row, Metric::eval_mismatches);
+            } else {
+                self.fill_row::<Counts>(i, metrics, &mut row, Metric::eval);
             }
             for m in 0..metrics.len() {
                 sink(m * total + offset, &row[m * width..(m + 1) * width]);
             }
             offset += width;
+        }
+    }
+
+    /// Row `i` of the triangle for each metric, metric-major: `row[m * width + (j - i - 1)]`.
+    fn fill_row<T: Tally>(&self, i: usize, metrics: &[Metric], row: &mut [f64], eval: impl Fn(Metric, &T) -> f64) {
+        let width = self.len() - 1 - i;
+        for j in i + 1..self.len() {
+            let tally = self.tally::<T>(i, j, f64::INFINITY).expect(UNBOUNDED);
+            for (m, &metric) in metrics.iter().enumerate() {
+                row[m * width + (j - i - 1)] = eval(metric, &tally);
+            }
         }
     }
 
@@ -205,13 +227,22 @@ impl SequenceSet {
     }
 
     pub(crate) fn sparse(&self, metric: Metric, threshold: f64, rows: Range<usize>) -> Links {
+        // Pick the scan once, not per pair.
+        if metric.needs_only_mismatches() {
+            self.sparse_with::<Mismatches>(metric, threshold, rows, Metric::eval_mismatches)
+        } else {
+            self.sparse_with::<Counts>(metric, threshold, rows, Metric::eval)
+        }
+    }
+
+    fn sparse_with<T: Tally>(&self, metric: Metric, threshold: f64, rows: Range<usize>, eval: impl Fn(Metric, &T) -> f64) -> Links {
         let mut links = Links::default();
         for i in rows {
             let max_i = self.seqs[i].informative;
             for j in i + 1..self.len() {
                 let bound = metric.mismatch_bound(threshold, max_i.min(self.seqs[j].informative));
-                if let Some(c) = self.counts(i, j, bound) {
-                    let d = metric.eval(&c);
+                if let Some(tally) = self.tally::<T>(i, j, bound) {
+                    let d = eval(metric, &tally);
                     if d <= threshold {
                         links.source.push(i as u32);
                         links.target.push(j as u32);
@@ -223,6 +254,8 @@ impl SequenceSet {
         links
     }
 }
+
+const UNBOUNDED: &str = "an unbounded scan always completes";
 
 fn parse_metric(name: &str) -> Result<Metric, String> {
     Metric::parse(name).ok_or_else(|| format!("unknown metric '{name}' (expected one of: {METRIC_NAMES})"))
