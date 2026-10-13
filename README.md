@@ -29,7 +29,8 @@ High-performance nucleotide sequence distance calculations compiled to WebAssemb
 Evolutionary distances are expected substitutions per site, so they can exceed 1. When two
 sequences are too divergent for a model (one of its logarithms would need a non-positive
 argument, e.g. p ≥ 3/4 for JC69), the distance is `Infinity`; it never falls within a finite
-`links()` threshold.
+`links()` threshold. A log argument within rounding error of zero (≤ 1e-12) counts as zero, so a
+pair exactly on a model's boundary is `Infinity` too, rather than a spurious distance of about 19.
 
 When two sequences share no comparable sites at all (for example, they only overlap at gaps),
 every distance is `NaN`: it is undefined, not maximal. `links()` never includes such a pair, and
@@ -370,10 +371,22 @@ This generates WebAssembly files in the `pkg/` directory:
 
 ### Testing
 
-Run the Rust test suite (includes a bit-for-bit comparison with the previous implementation):
+Run the Rust test suite:
 ```bash
 npm test        # same as: cargo test
 ```
+
+It includes:
+- unit tests, among them a bit-for-bit comparison with the previous implementation;
+- reference values from R's `ape::dist.dna` for SNPs, p-distance, transitions, transversions,
+  JC69, K2P (K80), T92 and TN93 on 208 generated pairs (`tests/reference/`). The table is
+  produced by `Rscript tests/reference/generate.R` (needs the `ape` package); the script's header
+  explains where ape's conventions differ from this library's;
+- property-based tests (`src/proptests.rs`, using `proptest`) that generate sets of related
+  sequences with gaps, ambiguity codes, mixed case and unequal lengths, and check the kernels
+  against a per-site reference, symmetry, self-distance, value ranges, row ranges and
+  `links()`. Failures shrink to a minimal set of sequences. For a longer search:
+  `PROPTEST_CASES=10000 cargo test --release proptests`.
 
 Check the JavaScript bindings (typed arrays, optional arguments, thrown errors) against a Node
 build:
@@ -396,8 +409,12 @@ bx-distance-models/
 │   │   ├── basic.rs           # Basic distance metrics
 │   │   ├── evolutionary.rs    # Evolutionary distance models
 │   │   └── diagnostics.rs     # Transition/transversion analysis
-│   └── tests.rs               # Test suite
-├── tests/node/smoke.mjs       # JS binding checks (npm run test:node)
+│   ├── tests.rs               # Unit tests
+│   ├── reference_tests.rs     # Checks against ape::dist.dna
+│   └── proptests.rs           # Property-based tests
+├── tests/
+│   ├── node/smoke.mjs         # JS binding checks (npm run test:node)
+│   └── reference/             # ape reference table and the R script that generates it
 ├── bench/                     # Benchmark harness
 ├── docs/                      # Performance analysis
 ├── pkg/                       # Generated WASM bindings
@@ -436,6 +453,11 @@ Contributions are welcome! Please:
 3. Commit your changes
 4. Push to the branch
 5. Open a pull request
+
+CI (`.github/workflows/ci.yml`) runs clippy with warnings as errors (native and wasm32),
+`cargo test`, a longer property-test search, the release WebAssembly build, `npm run test:node`
+and every benchmark driver on tiny inputs. When `tests/reference/` changes, a second workflow
+regenerates the ape table and fails if it differs from the committed one.
 
 ## License
 

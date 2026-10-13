@@ -22,8 +22,14 @@ bx-distance-models/
 │   │   ├── basic.rs              # SNPs, Hamming, P-distance
 │   │   ├── evolutionary.rs       # TN93, JC69, K2P, T92 (as tn92)
 │   │   └── diagnostics.rs        # Transitions/transversions/ratios
-│   └── tests.rs                  # Unit tests (incl. bit-for-bit check against the old kernels)
-├── tests/node/smoke.mjs          # JS binding checks against a Node build (npm run test:node)
+│   ├── tests.rs                  # Unit tests (incl. bit-for-bit check against the old kernels)
+│   ├── reference_tests.rs        # Checks against ape::dist.dna (table in tests/reference/)
+│   └── proptests.rs              # Property-based tests (proptest): kernels vs per-site reference, invariants
+├── tests/
+│   ├── node/smoke.mjs            # JS binding checks against a Node build (npm run test:node)
+│   └── reference/                # generate.R (R + ape) → ape_distances.tsv, read by reference_tests.rs
+├── .github/workflows/            # ci.yml (clippy, tests, wasm build, Node checks, bench drivers);
+│                                 # reference.yml (regenerates the ape table when it changes)
 ├── bench/                        # Benchmark harness (see bench/README.md)
 │   ├── kernels/                  # Standalone kernel-benchmark crate (raw extern "C" exports)
 │   └── *.mjs                     # Node drivers: kernels, public API, workers; synthetic data
@@ -72,7 +78,8 @@ bx-distance-models/
   (`name_distance(seq1, seq2)` etc.) that calls it via the matching `from_strs`
 - `basic.rs`: SNPs (count), Hamming / p-distance (identical, proportion [0, 1])
 - `evolutionary.rs`: TN93, JC69, K2P, T92 (Tamura 1992, exposed as `tn92`). Uncapped
-  substitutions per site; `f64::INFINITY` when a log argument would be non-positive. Zero-weight
+  substitutions per site; `f64::INFINITY` when a log argument would be non-positive, or is within
+  rounding of zero (`<= SATURATION`, 1e-12: exact boundary pairs otherwise gave ~19). Zero-weight
   terms of degenerate base compositions drop out (`ratio`/`weighted_ln`) instead of becoming NaN
 - `diagnostics.rs`: transitions, transversions, Ts/Tv ratio
 - `mod.rs`: `Metric` enum → `parse()` (names accepted from JS), `scan()` (the cheapest `Scan` that
@@ -144,7 +151,10 @@ src/*.rs → wasm-pack → pkg/
 ### Commands
 - `npm run build` → dev build (fast compile, unoptimized WASM)
 - `npm run build:release` → optimized build (slower compile, faster runtime)
-- `cargo test` (or `npm test`) → run Rust unit tests
+- `cargo test` (or `npm test`) → unit, ape-reference and property-based tests
+- `PROPTEST_CASES=10000 cargo test --release proptests` → longer property-test search
+- `cargo clippy --all-targets -- -D warnings` → lint as CI does (also `--target wasm32-unknown-unknown`)
+- `Rscript tests/reference/generate.R` → regenerate the ape reference table (needs R + `ape`)
 - `npm run test:node` → build for Node and check the JS bindings
 - `npm run bench:build` then `npm run bench:kernels` / `bench:api` / `bench:workers` → benchmarks (see `bench/README.md`)
 
@@ -171,7 +181,10 @@ src/*.rs → wasm-pack → pkg/
    pruning would drop valid links)
 3. If it needs more than `Counts` provides, add a new `Tally` type (like `CountsWithGc`) and `Scan`
    level rather than growing `Counts` (see the 64-byte note above), and measure the dense path
-4. Add tests in `tests.rs`; `ALL` in the tests lists every metric
+4. Add tests in `tests.rs`; `ALL` in the tests (and in `proptests.rs`) lists every metric. If
+   `ape::dist.dna` has the model, add its column to `MODELS` in `tests/reference/generate.R`,
+   regenerate with `Rscript tests/reference/generate.R`, and map it in `reference_tests.rs`
+   (`F81` and `logdet` are already in the table, unused)
 5. Rebuild: `npm run build:release`
 
 ### Modifying Core Logic
@@ -186,9 +199,16 @@ src/*.rs → wasm-pack → pkg/
 - Avoid allocations, JS calls and data-dependent branches in hot paths
 
 ### Understanding Test Flow
-- `tests.rs` uses `#[cfg(test)]` blocks with `#[test]` attribute
-- Can compare Rust results directly
-- WASM bindings tested indirectly via JS test suite (if present)
+- `tests.rs`: hand-computed cases, the legacy (pre-encoding) implementation as a reference, and
+  fixed-seed random sets
+- `reference_tests.rs`: every pair in `tests/reference/ape_distances.tsv`, through both the string
+  functions and `SequenceSet`. NA cells are cases ape scores differently by design (see the R
+  script's header); saturated models are NaN in ape and `Infinity` here
+- `proptests.rs`: generated sets of related sequences in all three ambiguity modes; failures shrink
+  to a minimal input. With integer counts (skip mode) checks are bit for bit; with fractional
+  counts (resolve/average) they allow rounding, since summation order differs between scan levels
+- `tests/node/smoke.mjs`: the wasm-bindgen surface (`npm run test:node`)
+- CI (`.github/workflows/ci.yml`) runs all of the above plus clippy and the benchmark drivers
 
 ## File I/O & State
 - **No file I/O**: Pure computation library

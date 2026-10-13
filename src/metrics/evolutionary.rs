@@ -3,6 +3,11 @@
 /// Each returns the expected number of substitutions per site under its model. These distances
 /// are not bounded by 1. When the sequences are too divergent for a model (one of its logarithms
 /// would need a non-positive argument), the distance is `f64::INFINITY`.
+///
+/// A log argument at or below [`SATURATION`] counts as zero. Arguments are differences of rounded
+/// proportions, so a pair exactly on a model's boundary often leaves a residue of ~1e-16 instead
+/// of 0 (K2P with 1 transition and 1 transversion in 3 sites: 1 - 2/3 - 1/3 = 5.6e-17), which
+/// would turn `Infinity` into a distance of about 19 that depends on the order of the sequences.
 use wasm_bindgen::prelude::*;
 use crate::counts::{Counts, CountsWithGc, Mismatches};
 
@@ -47,6 +52,11 @@ fn ratio(num: f64, den: f64) -> f64 {
     if den == 0.0 { 0.0 } else { num / den }
 }
 
+/// Largest log argument treated as zero: well above rounding error, and only reached by distances
+/// beyond 27.6 substitutions per site times the term's weight (13.8 for K2P's transition term,
+/// 20.7 for JC69), which no model can estimate.
+pub(crate) const SATURATION: f64 = 1e-12;
+
 /// `weight * ln(term)`, taken as 0 when the weight is 0 (the term drops out of the model).
 fn weighted_ln(weight: f64, term: f64) -> f64 {
     if weight == 0.0 { 0.0 } else { weight * term.ln() }
@@ -54,7 +64,7 @@ fn weighted_ln(weight: f64, term: f64) -> f64 {
 
 /// Whether a log term that is part of the model needs a non-positive argument.
 fn saturated(weight: f64, term: f64) -> bool {
-    weight != 0.0 && term <= 0.0
+    weight != 0.0 && term <= SATURATION
 }
 
 pub(crate) fn tn93(c: &Counts) -> f64 {
@@ -103,7 +113,7 @@ pub(crate) fn jc69(m: &Mismatches) -> f64 {
 
     // JC69 formula: d = -3/4 * ln(1 - 4/3 * p)
     let arg = 1.0 - (4.0 / 3.0) * p;
-    if arg <= 0.0 {
+    if arg <= SATURATION {
         return f64::INFINITY;
     }
 
@@ -122,7 +132,7 @@ pub(crate) fn k2p(c: &Counts) -> f64 {
     let arg1 = 1.0 - 2.0 * p - q;
     let arg2 = 1.0 - 2.0 * q;
 
-    if arg1 <= 0.0 || arg2 <= 0.0 {
+    if arg1 <= SATURATION || arg2 <= SATURATION {
         return f64::INFINITY;
     }
 

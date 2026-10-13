@@ -1,0 +1,30 @@
+name: Reference table
+
+# Checks that tests/reference/ape_distances.tsv is what tests/reference/generate.R produces, so the
+# table cannot drift from the script. Runs when either changes.
+on:
+  push:
+    branches: [main]
+    paths: [tests/reference/**, .github/workflows/reference.yml]
+  pull_request:
+    paths: [tests/reference/**, .github/workflows/reference.yml]
+  workflow_dispatch:
+
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - name: Install ape
+        run: Rscript -e 'install.packages("ape")'
+      - name: Regenerate
+        run: Rscript tests/reference/generate.R
+      # The first line records the ape and R versions, which may differ from the committed ones
+      - name: Compare with the committed table
+        run: |
+          git show HEAD:tests/reference/ape_distances.tsv | tail -n +2 > committed.tsv
+          tail -n +2 tests/reference/ape_distances.tsv > regenerated.tsv
+          diff -u committed.tsv regenerated.tsv

@@ -6,11 +6,12 @@ mod sequence_set;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod reference_tests;
+#[cfg(test)]
+mod proptests;
 
 use wasm_bindgen::prelude::*;
-
-#[cfg(feature = "console_error_panic_hook")]
-use console_error_panic_hook;
 
 /// Initialize panic hook for better error messages in browser console
 #[wasm_bindgen(start)]
