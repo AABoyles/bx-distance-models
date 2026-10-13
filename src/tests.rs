@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use crate::counts::{Counts, CountsWithGc, Mismatches};
     use crate::encoding::{Ambiguity, IUPAC};
@@ -103,6 +104,7 @@ mod tests {
 
     /// Verbatim copies of the implementations this crate shipped before the encoded kernel,
     /// used as the reference for inputs where both agree on which sites count (ACGTN-).
+    #[allow(clippy::manual_clamp)]
     mod legacy {
         fn is_valid_base(b: u8) -> bool { matches!(b, b'A' | b'C' | b'G' | b'T') }
         fn is_purine(b: u8) -> bool { matches!(b, b'A' | b'G') }
@@ -416,6 +418,33 @@ mod tests {
         assert!(near(k2p(&c(35.0, 25.0)), 1.671_15, 1e-5));
         assert_eq!(k2p(&c(40.0, 25.0)), f64::INFINITY); // 1 - 2P - Q < 0
         assert_eq!(k2p(&c(0.0, 50.0)), f64::INFINITY); // 1 - 2Q = 0
+    }
+
+    #[test]
+    fn pairs_exactly_on_the_saturation_boundary_are_infinite() {
+        use metrics::evolutionary::{jc69_distance, k2p_distance, tn92_distance, tn93_distance};
+        // 1 - 2/3 - 1/3 is 5.6e-17 in floating point, which gave K2P = 18.99 instead of Infinity
+        assert_eq!(k2p_distance("AAA", "GCA"), f64::INFINITY);
+        // Every K2P pair with 1 - 2P - Q = 0 exactly: k transitions, s - 2k transversions in s sites
+        for s in 1..80usize {
+            for k in 0..=s / 2 {
+                let a = "A".repeat(s);
+                let b = "G".repeat(k) + &"C".repeat(s - 2 * k) + &"A".repeat(k);
+                assert_eq!(k2p_distance(&a, &b), f64::INFINITY, "s={s} k={k}");
+            }
+        }
+        // ... and every JC69 pair with p = 3/4 exactly, and their TN93 / T92 counterparts with
+        // uniform base frequencies and G+C content 1/2 (where both reduce to K2P)
+        for n in 1..60 {
+            let (a, b) = ("ACGT".repeat(n), "CATG".repeat(n));
+            assert_eq!(jc69_distance(&"A".repeat(4 * n), &("C".repeat(3 * n) + &"A".repeat(n))), f64::INFINITY);
+            for d in [k2p_distance(&a, &b), tn93_distance(&a, &b), tn92_distance(&a, &b)] {
+                assert_eq!(d, f64::INFINITY, "n={n}");
+            }
+        }
+        // Just inside the boundary the distances are large but finite
+        let (a, b) = ("A".repeat(1000), "G".repeat(333) + &"C".repeat(333) + &"A".repeat(334));
+        assert!((k2p_distance(&a, &b) - 3.728).abs() < 0.001, "{}", k2p_distance(&a, &b));
     }
 
     /// 400 sites, every base 100 times in both sequences, with `k` A<->G and `k` C<->T transition
