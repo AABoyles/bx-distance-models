@@ -12,7 +12,7 @@ pub fn snps_distance(seq1: &str, seq2: &str) -> f64 {
 
 /// Compute Hamming distance between two aligned sequences.
 /// Returns the proportion of differing positions (0 to 1) among compared sites,
-/// or 1.0 if there are none.
+/// or NaN if there are none (the distance is undefined).
 #[wasm_bindgen]
 pub fn hamming_distance(seq1: &str, seq2: &str) -> f64 {
     hamming(&Mismatches::from_strs(seq1, seq2))
@@ -31,7 +31,7 @@ pub(crate) fn snps(m: &Mismatches) -> f64 {
 
 pub(crate) fn hamming(m: &Mismatches) -> f64 {
     if m.sites == 0.0 {
-        1.0
+        f64::NAN
     } else {
         m.mismatches / m.sites
     }

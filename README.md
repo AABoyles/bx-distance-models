@@ -31,6 +31,10 @@ sequences are too divergent for a model (one of its logarithms would need a non-
 argument, e.g. p ≥ 3/4 for JC69), the distance is `Infinity`; it never falls within a finite
 `links()` threshold.
 
+When two sequences share no comparable sites at all (for example, they only overlap at gaps),
+every distance is `NaN`: it is undefined, not maximal. `links()` never includes such a pair, and
+the SNP count is 0.
+
 ### Diagnostics
 - **Transitions Count**: Purine-to-purine (A↔G) and pyrimidine-to-pyrimidine (C↔T) changes
 - **Transversions Count**: Purine-to-pyrimidine and pyrimidine-to-purine changes
