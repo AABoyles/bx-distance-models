@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust tests and clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy (native, with tests)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Clippy (wasm32)
+        run: cargo clippy --target wasm32-unknown-unknown -- -D warnings
+      - name: Unit, reference and property tests
+        run: cargo test
+      - name: Longer property-test search
+        run: cargo test --release proptests
+        env:
+          PROPTEST_CASES: 5000
+
+  wasm:
+    name: WebAssembly build, JS bindings and benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            bench/kernels
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Release build (bundler target, as published)
+        run: npm run build:release
+      - name: JS binding tests (Node build)
+        run: npm run test:node
+      - name: Benchmark builds
+        run: npm run bench:build:kernels
+      # Tiny inputs: checks that every driver still runs, not how fast
+      - name: Benchmark drivers
+        run: |
+          node bench/kernels.mjs 40 200
+          node bench/kernels.mjs --simd 40 200
+          node bench/api.mjs 40 200
+          node bench/workers.mjs 40 200 1 2
+          node bench/workers-api.mjs 40 200 1 2
