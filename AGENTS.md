@@ -127,7 +127,8 @@ bx-distance-models/
 - Proportions (Hamming, p-distance): `f64` [0, 1]
 - Evolutionary distances (TN93, JC69, K2P, T92): substitutions per site, `f64` >= 0 and not capped;
   `Infinity` when the model saturates
-- No compared sites at all: `1.0` for every distance (`0.0` for SNPs)
+- No compared sites at all: `NaN` for every distance (undefined; never within a `links()` threshold).
+  SNPs and the transition/transversion counts give `0.0`
 
 ## Build System
 

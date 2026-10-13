@@ -340,6 +340,8 @@ mod tests {
         let corrected = matches!(metric, Metric::Jc69 | Metric::K2p | Metric::Tn93);
         match metric {
             Metric::Tn92 => true,
+            // No comparable sites: the old code returned 1.0, now the distance is undefined.
+            _ if new.is_nan() => old == 1.0,
             _ if corrected && new.is_infinite() => {
                 old == 1.0 || (metric == Metric::Tn93 && same(old, old_hamming))
             }
@@ -792,5 +794,31 @@ mod tests {
         let light = set.dense(&[Metric::Hamming, Metric::Snps], 0..30);
         let full = set.dense(&[Metric::Hamming, Metric::Snps, Metric::Tn93], 0..30);
         assert_eq!(light[..], full[..2 * np]);
+    }
+
+    #[test]
+    fn no_comparable_sites_is_nan_except_for_snps() {
+        use metrics::basic::{hamming_distance, p_distance, snps_distance};
+        use metrics::evolutionary::{jc69_distance, k2p_distance, tn92_distance, tn93_distance};
+        // Gaps, N and ambiguity codes only overlap with gaps: nothing to compare.
+        for (a, b) in [("", ""), ("ACGT", ""), ("--NN", "ACGT"), ("RYRY", "ACGT")] {
+            for d in [hamming_distance(a, b), p_distance(a, b), jc69_distance(a, b),
+                      k2p_distance(a, b), tn93_distance(a, b), tn92_distance(a, b)] {
+                assert!(d.is_nan(), "{a:?} vs {b:?}: {d}");
+            }
+            assert_eq!(snps_distance(a, b), 0.0);
+        }
+        // Same through SequenceSet, and links() never includes such a pair.
+        let set = SequenceSet::from_strs(&["ACGT----", "----ACGT", "ACGTACGT"], Ambiguity::Skip);
+        for metric in ALL {
+            let d = set.pair(metric, 0, 1);
+            match metric {
+                Metric::Snps | Metric::Transitions | Metric::Transversions | Metric::TsTvRatio => assert!(!d.is_nan()),
+                _ => assert!(d.is_nan(), "{metric:?}"),
+            }
+            let links = set.sparse(metric, f64::INFINITY, 0..3);
+            let has_01 = links.source.iter().zip(&links.target).any(|(&s, &t)| (s, t) == (0, 1));
+            assert_eq!(has_01, !d.is_nan(), "{metric:?}");
+        }
     }
 }

@@ -59,7 +59,7 @@ fn saturated(weight: f64, term: f64) -> bool {
 
 pub(crate) fn tn93(c: &Counts) -> f64 {
     if c.sites == 0.0 {
-        return 1.0;
+        return f64::NAN;
     }
 
     // Normalize frequencies
@@ -96,7 +96,7 @@ pub(crate) fn tn93(c: &Counts) -> f64 {
 
 pub(crate) fn jc69(m: &Mismatches) -> f64 {
     if m.sites == 0.0 {
-        return 1.0;
+        return f64::NAN;
     }
 
     let p = m.mismatches / m.sites;
@@ -112,7 +112,7 @@ pub(crate) fn jc69(m: &Mismatches) -> f64 {
 
 pub(crate) fn k2p(c: &Counts) -> f64 {
     if c.sites == 0.0 {
-        return 1.0;
+        return f64::NAN;
     }
 
     let p = c.transitions() / c.sites;
@@ -133,7 +133,7 @@ pub(crate) fn k2p(c: &Counts) -> f64 {
 pub(crate) fn tn92(gc: &CountsWithGc) -> f64 {
     let c = &gc.counts;
     if c.sites == 0.0 {
-        return 1.0;
+        return f64::NAN;
     }
 
     let p = c.transitions() / c.sites;
