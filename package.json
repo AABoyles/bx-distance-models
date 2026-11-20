@@ -1,6 +1,6 @@
 {
   "name": "bx-distance-models",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "High-performance nucleotide sequence distance calculations compiled to WebAssembly",
   "type": "module",
   "scripts": {

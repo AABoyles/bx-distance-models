@@ -36,6 +36,14 @@ When two sequences share no comparable sites at all (for example, they only over
 every distance is `NaN`: it is undefined, not maximal. `links()` never includes such a pair, and
 the SNP count is 0.
 
+**TN93 when a base is missing.** If one of A, C, G, T never occurs in a pair's compared sites,
+some TN93 terms are 0/0 (no substitution of that kind is possible either). This library drops
+those terms, their limit. HIV-TRACE's tn93 uses the K2P formula for such a pair instead (and
+reports 1000 when that saturates). Both are defensible; they give different values. To match tn93,
+create the set with `{ tn93K2pFallback: true }` (see [SequenceSet](#batch-processing)); `'tn93'`
+then uses K2P for those pairs, still `Infinity` on saturation and `NaN` with nothing to compare.
+Pairs with all four bases are unaffected.
+
 ### Diagnostics
 - **Transitions Count**: Purine-to-purine (A↔G) and pyrimidine-to-pyrimidine (C↔T) changes
 - **Transversions Count**: Purine-to-pyrimidine and pyrimidine-to-purine changes
@@ -87,7 +95,7 @@ const distance = hamming_distance(seq1, seq2);
 ```
 
 Partial IUPAC ambiguity codes (`R`, `Y`, `S`, `W`, `K`, `M`, `B`, `D`, `H`, `V`) are skipped by
-the single-pair functions. `SequenceSet` can resolve them instead; see
+the single-pair functions. `SequenceSet` can resolve them, and `N`, instead; see
 [Ambiguity codes](#ambiguity-codes).
 
 ### Transition/Transversion Analysis
@@ -163,8 +171,11 @@ or cross-origin isolation is needed.
 #### Ambiguity codes
 
 ```javascript
-const set = new SequenceSet(seqs, 'resolve'); // or 'average'; default 'skip'
+const set = new SequenceSet(seqs, 'resolve'); // or 'average', 'gapmm'; default 'skip'
 ```
+
+The modes are those of HIV-TRACE's `tn93 -a` ([veg/tn93](https://github.com/veg/tn93)), and
+TN93 distances agree with it to 1e-12 (see [Testing](#testing)):
 
 - `'skip'` (default): sites where either sequence holds a partial ambiguity code are not compared.
   Every pair uses the fast bit-plane kernel.
@@ -172,11 +183,41 @@ const set = new SequenceSet(seqs, 'resolve'); // or 'average'; default 'skip'
   is averaged.
 - `'average'`: each site contributes every pair of bases the two codes allow, weighted equally
   (`R` vs `A` is half a match and half an A↔G transition). Counts can be fractional.
+- `'gapmm'`: as `'average'`, and a gap facing anything other than a gap is compared as an `N`
+  (any base), so a gap facing `A` adds a quarter to each of A-A, A-C, A-G and A-T: three quarters
+  of a mismatch. Gap facing gap is skipped. Every metric uses it, not only TN93.
 
-With `'resolve'` or `'average'`, sequences without ambiguity codes still use the fast path; only
-pairs involving a sequence that contains them pay for the slower fallback, and only in proportion
-to the number of ambiguous sites. `set.ambiguous_count()` reports how many sequences use it.
-`N` is always skipped.
+**HIV-TRACE's `-g`** (`tn93 -a resolve -g FRACTION`, what HIV-TRACE runs) is `'resolve'` with a
+maximum ambiguity fraction:
+
+```javascript
+const set = new SequenceSet(seqs, 'resolve', { maxAmbiguityFraction: 0.015 });
+const links = set.links('tn93', 0.015); // early exit still applies
+```
+
+Each pair is resolved, unless the sites resolution touched are at least that fraction of the
+pair's compared sites; then the pair is averaged instead. As in tn93 (`ambig_count` in
+`computeTN93`), a resolved site is a base facing a code that contains it (`R` facing `A`, `N`
+facing anything), or two ambiguity codes facing each other, whether or not they share a base. A
+base facing a code that does not contain it (`R` facing `C`) is averaged in either case and does
+not count. 1 never averages, 0 always does. The decision costs one scan per pair: the bit-plane
+counts are shared, and only the ambiguous sites are counted again with the averaging table.
+
+**`N` and `?`** are fourfold ambiguity codes (any base) in `'resolve'`, `'average'` and
+`'gapmm'`, as in tn93: `N` facing `A` counts as a match (A-A) when resolving, and adds a quarter
+to each of A-A, A-C, A-G and A-T when averaging. `'skip'` and the single-pair functions skip them.
+Releases up to 0.1.0 skipped `N` in every mode (see the [changelog](CHANGELOG.md)).
+
+**Other characters** that are not nucleotides (`-`, `.`, `X`, `*`, digits, ...) are gaps: skipped,
+or compared as `N` in `'gapmm'`. tn93 itself drops such characters while reading FASTA (shifting
+the rest of the sequence), which an aligned per-site comparison cannot do. `U` is read as `T`
+everywhere; tn93 reads it as a separate code that skip mode skips.
+
+Sequences without ambiguity codes still use the fast path; only pairs involving a sequence that
+contains them pay for the extra work. Partial codes are visited one by one, which costs in
+proportion to their number; sites compared as `N` (and gaps in `'gapmm'`) are counted with
+popcounts over the 64-site words that hold any. `set.ambiguous_count()` reports how many
+sequences need either.
 
 #### Legacy batch functions
 
@@ -265,7 +306,8 @@ These return substitutions per site (not capped at 1), or `Infinity` when the mo
 
 #### `tn93_distance(seq1: string, seq2: string) -> number`
 Tamura-Nei 93 distance (separate rates for A↔G, C↔T and transversions; base frequencies from the
-two sequences).
+two sequences). Without the K2P fallback when a base is missing (`SequenceSet` has it as an
+option).
 
 #### `jc69_distance(seq1: string, seq2: string) -> number`
 Jukes-Cantor 69 distance (simple model, assumes equal substitution rates). `Infinity` when p ≥ 3/4.
@@ -290,8 +332,17 @@ Ratio of transitions to transversions (useful for quality assessment).
 
 ### Batch Processing
 
-#### `new SequenceSet(seqs: string[], ambiguity?: 'skip' | 'resolve' | 'average')`
-Encodes aligned sequences once. Throws on an unknown ambiguity mode.
+#### `new SequenceSet(seqs: string[], ambiguity?: 'skip' | 'resolve' | 'average' | 'gapmm', options?: SequenceSetOptions)`
+Encodes aligned sequences once. Throws on an unknown ambiguity mode, an unknown option, or an
+invalid one. Options:
+
+- `maxAmbiguityFraction?: number` (`'resolve'` only, 0 to 1): HIV-TRACE's `-g`; see
+  [Ambiguity codes](#ambiguity-codes).
+- `tn93K2pFallback?: boolean`: `'tn93'` uses K2P for a pair in which a base never occurs, as
+  HIV-TRACE's tn93 does (default: the TN93 terms that vanish drop out). See
+  [Evolutionary Models](#evolutionary-models).
+
+The `.d.ts` exports `AmbiguityMode` and `SequenceSetOptions` for these arguments.
 
 - `length: number`: number of sequences.
 - `distance(metric, i, j) -> number`: one pair.
@@ -299,7 +350,8 @@ Encodes aligned sequences once. Throws on an unknown ambiguity mode.
   `[rowStart, rowEnd)` (default all), in pair order.
 - `links(metric, threshold, rowStart?, rowEnd?) -> Links`: pairs with distance `<= threshold`.
 - `row_splits(parts) -> Uint32Array`: `parts + 1` row boundaries with balanced pair counts.
-- `ambiguous_count() -> number`: sequences that use the ambiguity fallback.
+- `ambiguous_count() -> number`: sequences holding an ambiguity code the mode compares (gaps
+  count in `'gapmm'`), whose pairs need more than the fast kernel.
 - `free()`: releases WASM memory.
 
 Methods throw on an unknown metric or an invalid row range.
@@ -382,6 +434,11 @@ It includes:
   JC69, K2P (K80), T92 and TN93 on 208 generated pairs (`tests/reference/`). The table is
   produced by `Rscript tests/reference/generate.R` (needs the `ape` package); the script's header
   explains where ape's conventions differ from this library's;
+- reference values from HIV-TRACE's `tn93` (veg/tn93 v1.1.0) for TN93 in every ambiguity mode, on
+  MicrobeTrace's hand-checkable golden alignments, cases with `N` and `?`, and a seeded random
+  alignment with gaps, ambiguity codes and lowercase (`tests/reference/tn93/`). The table is
+  produced by `python3 tests/reference/tn93/generate.py`, which builds tn93 from source (needs
+  git, cmake and a C++ compiler; or set `TN93` to a binary built as the script describes);
 - property-based tests (`src/proptests.rs`, using `proptest`) that generate sets of related
   sequences with gaps, ambiguity codes, mixed case and unequal lengths, and check the kernels
   against a per-site reference, symmetry, self-distance, value ranges, row ranges and

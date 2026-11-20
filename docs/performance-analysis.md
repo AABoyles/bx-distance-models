@@ -329,6 +329,73 @@ Two performance notes from the change:
   in `dense_js`, against none before). The G+C count therefore lives in a separate
   `CountsWithGc` type.
 
+## GapMM: gaps and N as ambiguity codes
+
+HIV-TRACE's `tn93 -a gapmm` compares a gap facing a non-gap as an `N`, and treats `N` and `?` as
+fourfold ambiguity codes. Gaps are common (ragged ends, indels), so the sparse per-site fallback
+used for R/Y would be slow here. The benchmark alignment holds ~19 gaps and ~3 N per sequence;
+at the ~5.5 ns per visited site that 0.5% R/Y costs (54 ns/pair for ~10 sites per pair), that
+fallback would put GapMM TN93 near 350 ns/pair (an estimate, not measured).
+
+Instead, each sequence gets a second plane, `[any, n]` per 64 sites: `any` marks every site
+compared as an `N`, `n` the actual `N`/`?` (gap facing gap is skipped, so a pair counts
+`any1 & any2 & (n1 | n2)`). A base facing an `N` adds a fixed quarter to each of its four (base, X)
+cells, so a pass of ~5 popcounts per word and side (sites, and the `lo`, `hi`, `lo & hi` planes,
+which give the per-base counts) plus one table lookup per base serves every metric. The light
+`Mismatches` scan only needs the site count. Partial codes facing an `N` still go through the sparse
+fallback, which now reads gaps and `N` as code 15.
+
+`bench/api.mjs`, n = 600, L = 1,000, warm, medians of 3 runs (ns/pair):
+
+| | before | GapMM, every word | GapMM, non-zero words |
+|---|---|---|---|
+| `distances('tn93')`, skip | 104 | | 101 |
+| `distances('hamming')`, skip | 30 | | 30 |
+| `distances('tn93')`, gapmm | – | 209 | 151 |
+| `distances('hamming')`, gapmm | – | 79 | 44 |
+| `links('tn93', 0.015)`, gapmm | – | | 31 (skip: 30) |
+| `distances('tn93')`, 0.5% R/Y, gapmm | – | 264 | 205 |
+
+- **Visit only the words that hold a gap or N.** The first version scanned every word of both
+  sequences. Gaps cluster at the ends and N is sparse, so each sequence now keeps the indices of
+  its non-zero `any` words, and a pair visits only those (−28% for TN93, −44% for Hamming).
+- **Keep the per-pair check out of the skip-mode loop.** With the new pass behind a second
+  `if` in the inlined `count_pair`, skip-mode Hamming and SNPs ran 10–15% slower (30 → 34 and
+  27 → 31 ns/pair) though skip mode never takes the branch. Moving both passes into one
+  out-of-line call did not recover it; deciding once per row (`fill_row` calls the bit-plane
+  kernel alone when there is no resolution table) did.
+- `links()` keeps its exact early exit: the extra passes only add mismatches, and a sequence's
+  `informative` count includes every site it could have compared as an `N`.
+
+`'resolve'` and `'average'` compare `N` and `?` the same way (as tn93 does), through the same
+pass. With ~3 N per sequence, every pair takes it: TN93 with 0.5% R/Y went from 155 to 197 ns/pair
+in both modes. The pass touches only a few words here, so most of that is its fixed cost per pair
+(scaling nine table rows into the counts).
+
+## HIV-TRACE `-g`: resolve or average per pair
+
+`tn93 -a resolve -g F` resolves a pair unless the sites resolution touched are at least F of its
+compared sites, and averages it otherwise. Emulating it from outside means computing both a
+resolve and an average set in full and choosing per pair: twice the work, two dense blocks, and no
+early exit. Natively, the bit-plane counts are the same either way; only the ambiguity passes
+differ. They run with the resolution table while counting compared and resolved sites (exact
+integers; the weighted site sum can round below an integer), and a pair that turns out too
+ambiguous runs them again with the averaging table on top of the saved bit-plane counts. Resolve
+and average compare the same sites, so `links()` keeps its bound.
+
+`bench:api`, n = 600, L = 1,000, 0.5% R/Y and ~3 N per sequence (ns/pair, warm, medians of 3):
+
+| | resolve | `-g 0.015` |
+|---|---|---|
+| `distances('tn93')` | 205 | 279 |
+| `links('tn93', 0.015)` | | 33 |
+
+Counting visited sites costs the modes that do not need it: always on, it took resolve, average
+and GapMM from 197 to 215 ns/pair. It is now compiled in only for `-g` (a `const` generic), which
+recovered most of it; 205 against 197 remains (measured interleaved with a build of the previous
+commit). Replacing a closure with an inlined function and moving the passes out of line did not
+change it.
+
 ## Reproducing
 
 ```bash

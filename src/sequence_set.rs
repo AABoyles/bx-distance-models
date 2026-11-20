@@ -1,10 +1,10 @@
 //! Batch API: encode a set of aligned sequences once, then compute any metric over all pairs.
 use std::ops::Range;
 
-use js_sys::{Float64Array, Uint32Array};
+use js_sys::{Float64Array, Object, Reflect, Uint32Array};
 use wasm_bindgen::prelude::*;
 
-use crate::counts::{count_pair, Counts, CountsWithGc, Mismatches, Resolutions, Tally};
+use crate::counts::{count_pair, Comparison, Counts, CountsWithGc, Mismatches, Tally};
 use crate::encoding::{Ambiguity, Encoded};
 use crate::metrics::{Metric, Scan, METRIC_NAMES};
 
@@ -16,8 +16,78 @@ use crate::metrics::{Metric, Scan, METRIC_NAMES};
 #[wasm_bindgen]
 pub struct SequenceSet {
     seqs: Vec<Encoded>,
-    /// Ambiguity resolution table; `None` in "skip" mode.
-    resolutions: Option<Resolutions>,
+    /// How ambiguity codes are compared; `None` in "skip" mode.
+    comparison: Option<Comparison>,
+    /// `"tn93"` means [`Metric::Tn93K2p`].
+    tn93_k2p_fallback: bool,
+}
+
+/// The `options` object of `new SequenceSet(seqs, ambiguity, options)`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct SetOptions {
+    /// `maxAmbiguityFraction`: tn93's `-g`, with `"resolve"` only.
+    pub max_ambiguity_fraction: Option<f64>,
+    /// `tn93K2pFallback`: TN93 falls back to K2P when a base never occurs in a pair, as tn93 does.
+    pub tn93_k2p_fallback: bool,
+}
+
+const OPTION_NAMES: &str = "maxAmbiguityFraction, tn93K2pFallback";
+
+#[wasm_bindgen(typescript_custom_section)]
+const TS_TYPES: &str = r#"
+/** How `SequenceSet` compares ambiguity codes; the modes of HIV-TRACE's `tn93 -a`. */
+export type AmbiguityMode = 'skip' | 'resolve' | 'average' | 'gapmm';
+
+/** Options for `new SequenceSet(seqs, ambiguity, options)`. */
+export interface SequenceSetOptions {
+  /**
+   * With 'resolve' only, between 0 and 1: HIV-TRACE's `tn93 -a resolve -g FRACTION`. A pair whose
+   * resolved sites are at least this fraction of its compared sites is averaged instead.
+   */
+  maxAmbiguityFraction?: number;
+  /**
+   * 'tn93' falls back to K2P when a base never occurs in a pair, as HIV-TRACE's tn93 does
+   * (default: the TN93 terms that vanish drop out). Saturation still gives Infinity.
+   */
+  tn93K2pFallback?: boolean;
+}
+"#;
+
+impl SetOptions {
+    /// Reads the options from a JS object; unknown keys are errors, so a typo is not ignored.
+    fn from_js(options: Option<&Object>) -> Result<SetOptions, String> {
+        let mut parsed = SetOptions::default();
+        let Some(options) = options else { return Ok(parsed) };
+        for key in Object::keys(options).iter() {
+            let name = key.as_string().unwrap_or_default();
+            let value = Reflect::get(options, &key).map_err(|_| format!("cannot read option '{name}'"))?;
+            match name.as_str() {
+                "maxAmbiguityFraction" if value.is_undefined() || value.is_null() => {}
+                "maxAmbiguityFraction" => {
+                    parsed.max_ambiguity_fraction =
+                        Some(value.as_f64().ok_or("maxAmbiguityFraction must be a number")?);
+                }
+                "tn93K2pFallback" if value.is_undefined() || value.is_null() => {}
+                "tn93K2pFallback" => {
+                    parsed.tn93_k2p_fallback = value.as_bool().ok_or("tn93K2pFallback must be a boolean")?;
+                }
+                _ => return Err(format!("unknown option '{name}' (expected: {OPTION_NAMES})")),
+            }
+        }
+        Ok(parsed)
+    }
+
+    fn validate(&self, mode: Ambiguity) -> Result<(), String> {
+        if let Some(f) = self.max_ambiguity_fraction {
+            if mode != Ambiguity::Resolve {
+                return Err(format!("maxAmbiguityFraction needs ambiguity mode 'resolve', not '{}'", mode.name()));
+            }
+            if !(0.0..=1.0).contains(&f) {
+                return Err(format!("maxAmbiguityFraction must be between 0 and 1, got {f}"));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Pairs within a distance threshold, as parallel arrays: `source[k] < target[k]` are sequence
@@ -56,23 +126,38 @@ impl Links {
 #[wasm_bindgen]
 impl SequenceSet {
     /// Encodes `seqs` once. `ambiguity` decides how sites holding IUPAC ambiguity codes
-    /// (R, Y, S, W, K, M, B, D, H, V) are compared:
+    /// (R, Y, S, W, K, M, B, D, H, V) are compared, as HIV-TRACE's `tn93 -a` does:
     /// - `"skip"` (default): ignore them. Every pair uses the fast bit-plane kernel.
     /// - `"resolve"`: count a site as a match if the two codes share a base, otherwise average.
     /// - `"average"`: average over every pair of bases the two codes allow.
+    /// - `"gapmm"`: as `"average"`, and compare a gap facing anything but a gap as an `N`.
     ///
-    /// With `"resolve"` or `"average"`, only pairs involving a sequence that actually contains
-    /// ambiguity codes pay for the slower fallback. `N`, gaps and other characters are always
-    /// skipped.
+    /// Except in `"skip"` mode, `N` and `?` are fourfold ambiguity codes (any base): resolved
+    /// as a match facing a base, or averaged. Gaps and other characters are skipped (outside
+    /// `"gapmm"`). Only pairs involving a sequence that actually holds a compared ambiguity code
+    /// pay for the extra passes.
+    ///
+    /// `options`:
+    /// - `maxAmbiguityFraction` (with `"resolve"` only, between 0 and 1): HIV-TRACE's
+    ///   `tn93 -a resolve -g FRACTION`. A pair is resolved, unless the sites it resolved are at
+    ///   least this fraction of its compared sites; then it is averaged instead. As in tn93, a
+    ///   resolved site is a base facing a code that contains it, or two ambiguity codes (N
+    ///   included) whether or not they share a base. 1 never averages; 0 always does.
+    /// - `tn93K2pFallback` (boolean): `"tn93"` uses the K2P formula for a pair in which a base
+    ///   never occurs, as tn93 does. By default the TN93 terms that vanish drop out instead.
     #[wasm_bindgen(constructor)]
-    pub fn new(seqs: Vec<String>, ambiguity: Option<String>) -> Result<SequenceSet, JsError> {
+    // The parameters keep their generated types (`string`, `object`), which leaves them optional
+    // in TypeScript; `unchecked_param_type` would make them required. The types above document
+    // what they accept.
+    pub fn new(seqs: Vec<String>, ambiguity: Option<String>, options: Option<Object>) -> Result<SequenceSet, JsError> {
         let mode = match ambiguity.as_deref() {
             None => Ambiguity::Skip,
             Some(name) => Ambiguity::parse(name).ok_or_else(|| {
-                JsError::new(&format!("unknown ambiguity mode '{name}' (expected skip, resolve or average)"))
+                JsError::new(&format!("unknown ambiguity mode '{name}' (expected skip, resolve, average or gapmm)"))
             })?,
         };
-        Ok(SequenceSet::from_strs(&seqs, mode))
+        let options = SetOptions::from_js(options.as_ref()).map_err(|e| JsError::new(&e))?;
+        SequenceSet::with_options(&seqs, mode, options).map_err(|e| JsError::new(&e))
     }
 
     /// Number of sequences.
@@ -81,15 +166,15 @@ impl SequenceSet {
         self.seqs.len() as u32
     }
 
-    /// Number of sequences that contain ambiguity codes and use the fallback kernel
-    /// (always 0 in `"skip"` mode).
+    /// Number of sequences that hold an ambiguity code the mode compares, so that their pairs
+    /// take the extra passes (always 0 in `"skip"` mode; gaps count in `"gapmm"` mode).
     pub fn ambiguous_count(&self) -> u32 {
-        self.seqs.iter().filter(|s| s.ambiguity.is_some()).count() as u32
+        self.seqs.iter().filter(|s| s.has_ambiguity()).count() as u32
     }
 
     /// Distance between sequences `i` and `j`.
     pub fn distance(&self, metric: &str, i: u32, j: u32) -> Result<f64, JsError> {
-        let metric = parse_metric(metric).map_err(|e| JsError::new(&e))?;
+        let metric = self.metric(metric).map_err(|e| JsError::new(&e))?;
         let n = self.len();
         if i as usize >= n || j as usize >= n {
             return Err(JsError::new(&format!("index out of range for {n} sequences")));
@@ -101,7 +186,7 @@ impl SequenceSet {
     /// in pair order. Concatenating the results for consecutive row ranges gives the full
     /// triangle; `get_distance_index(i, j, n)` maps a pair to its position in it.
     pub fn distances(&self, metric: &str, row_start: Option<u32>, row_end: Option<u32>) -> Result<Float64Array, JsError> {
-        let metric = parse_metric(metric).map_err(|e| JsError::new(&e))?;
+        let metric = self.metric(metric).map_err(|e| JsError::new(&e))?;
         let rows = self.row_range(row_start, row_end).map_err(|e| JsError::new(&e))?;
         self.dense_js(&[metric], rows).map_err(|e| JsError::new(&e))
     }
@@ -112,7 +197,7 @@ impl SequenceSet {
     /// as soon as it can no longer pass, which makes sparse output much faster than
     /// `distances()` when most pairs are far apart.
     pub fn links(&self, metric: &str, threshold: f64, row_start: Option<u32>, row_end: Option<u32>) -> Result<Links, JsError> {
-        let metric = parse_metric(metric).map_err(|e| JsError::new(&e))?;
+        let metric = self.metric(metric).map_err(|e| JsError::new(&e))?;
         let rows = self.row_range(row_start, row_end).map_err(|e| JsError::new(&e))?;
         Ok(self.sparse(metric, threshold, rows))
     }
@@ -126,10 +211,20 @@ impl SequenceSet {
 
 impl SequenceSet {
     pub(crate) fn from_strs<S: AsRef<str>>(seqs: &[S], mode: Ambiguity) -> SequenceSet {
-        let resolutions = (mode != Ambiguity::Skip).then(|| Resolutions::new(mode));
-        let track = resolutions.is_some();
-        let seqs = seqs.iter().map(|s| Encoded::new(s.as_ref().as_bytes(), track)).collect();
-        SequenceSet { seqs, resolutions }
+        SequenceSet::with_options(seqs, mode, SetOptions::default()).expect("default options are valid")
+    }
+
+    pub(crate) fn with_options<S: AsRef<str>>(seqs: &[S], mode: Ambiguity, options: SetOptions) -> Result<SequenceSet, String> {
+        options.validate(mode)?;
+        let comparison = mode.tracks_ambiguity().then(|| Comparison::new(mode, options.max_ambiguity_fraction));
+        let seqs = seqs.iter().map(|s| Encoded::new(s.as_ref().as_bytes(), mode)).collect();
+        Ok(SequenceSet { seqs, comparison, tn93_k2p_fallback: options.tn93_k2p_fallback })
+    }
+
+    /// `name` as a metric of this set (the options can change what `"tn93"` means).
+    pub(crate) fn metric(&self, name: &str) -> Result<Metric, String> {
+        let metric = parse_metric(name)?;
+        Ok(if metric == Metric::Tn93 && self.tn93_k2p_fallback { Metric::Tn93K2p } else { metric })
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -139,7 +234,7 @@ impl SequenceSet {
     /// Scans pair (i, j); `None` if it has more than `max_mismatches` mismatches.
     #[inline]
     pub(crate) fn tally<T: Tally>(&self, i: usize, j: usize, max_mismatches: f64) -> Option<T> {
-        count_pair(&self.seqs[i], &self.seqs[j], self.resolutions.as_ref(), max_mismatches)
+        count_pair(&self.seqs[i], &self.seqs[j], self.comparison.as_ref(), max_mismatches)
     }
 
     /// `metric` for pair (i, j), from the cheapest scan that serves it.
@@ -191,10 +286,30 @@ impl SequenceSet {
     }
 
     /// Row `i` of the triangle for each metric, metric-major: `row[m * width + (j - i - 1)]`.
+    ///
+    /// Without ambiguity resolution the loop calls the bit-plane kernel alone: the cheapest scans
+    /// take ~30 ns per pair, and even an untaken per-pair branch to the ambiguity passes in the
+    /// loop cost them ~10%.
     fn fill_row<T: Tally>(&self, i: usize, metrics: &[Metric], row: &mut [f64], eval: impl Fn(Metric, &T) -> f64) {
+        let x = &self.seqs[i];
+        match &self.comparison {
+            None => self.fill_row_with(i, metrics, row, eval, |y| T::count_planes(&x.words, &y.words, f64::INFINITY)),
+            Some(c) => self.fill_row_with(i, metrics, row, eval, |y| count_pair(x, y, Some(c), f64::INFINITY)),
+        }
+    }
+
+    #[inline(always)]
+    fn fill_row_with<T>(
+        &self,
+        i: usize,
+        metrics: &[Metric],
+        row: &mut [f64],
+        eval: impl Fn(Metric, &T) -> f64,
+        count: impl Fn(&Encoded) -> Option<T>,
+    ) {
         let width = self.len() - 1 - i;
-        for j in i + 1..self.len() {
-            let tally = self.tally::<T>(i, j, f64::INFINITY).expect(UNBOUNDED);
+        for (j, y) in self.seqs.iter().enumerate().skip(i + 1) {
+            let tally = count(y).expect(UNBOUNDED);
             for (m, &metric) in metrics.iter().enumerate() {
                 row[m * width + (j - i - 1)] = eval(metric, &tally);
             }

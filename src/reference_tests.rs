@@ -64,6 +64,7 @@ fn single_pair(metric: Metric, a: &str, b: &str) -> f64 {
         Metric::K2p => k2p_distance(a, b),
         Metric::Tn92 => tn92_distance(a, b),
         Metric::Tn93 => tn93_distance(a, b),
+        Metric::Tn93K2p => tn93_or_k2p(&Counts::from_strs(a, b)),
         Metric::Transitions => transitions_count(a, b),
         Metric::Transversions => transversions_count(a, b),
         Metric::TsTvRatio => ts_tv_ratio(a, b),
@@ -128,6 +129,200 @@ fn sequence_set_matches_ape() {
                 let got = set.pair(metric, 2 * n, 2 * n + 1);
                 assert!(agrees(got, want, c.sites), "case {} {name} {metric:?}: got {got}, ape {want}", c.id);
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// HIV-TRACE's tn93, from the table that `tests/reference/tn93/generate.py` writes: every pair of
+// the FASTA files in `tests/reference/tn93/`, in every ambiguity mode.
+
+mod tn93 {
+    use std::collections::HashMap;
+
+    use crate::counts::Counts;
+    use crate::encoding::Ambiguity;
+    use crate::metrics::{evolutionary::{tn93, tn93_distance}, Metric};
+    use crate::sequence_set::{SequenceSet, SetOptions};
+
+    const TABLE: &str = include_str!("../tests/reference/tn93_distances.tsv");
+
+    const FILES: [(&str, &str); 6] = [
+        ("distances.fasta", include_str!("../tests/reference/tn93/distances.fasta")),
+        ("ambiguity.fasta", include_str!("../tests/reference/tn93/ambiguity.fasta")),
+        ("hivtrace-g.fasta", include_str!("../tests/reference/tn93/hivtrace-g.fasta")),
+        ("n_codes.fasta", include_str!("../tests/reference/tn93/n_codes.fasta")),
+        ("missing_base.fasta", include_str!("../tests/reference/tn93/missing_base.fasta")),
+        ("random.fasta", include_str!("../tests/reference/tn93/random.fasta")),
+    ];
+
+    /// `(name, sequence)` in file order; sequences may span several lines.
+    fn fasta(text: &str) -> Vec<(&str, String)> {
+        let mut out: Vec<(&str, String)> = Vec::new();
+        for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            match line.strip_prefix('>') {
+                Some(name) => out.push((name, String::new())),
+                None => out.last_mut().expect("sequence before a name").1.push_str(line),
+            }
+        }
+        out
+    }
+
+    struct Row<'a> {
+        file: &'a str,
+        mode: &'a str,
+        fraction: Option<f64>,
+        id1: &'a str,
+        id2: &'a str,
+        /// `None`: tn93 left the pair out (at most one compared site).
+        tn93: Option<f64>,
+    }
+
+    fn rows() -> Vec<Row<'static>> {
+        let mut lines = TABLE.lines().filter(|l| !l.starts_with('#'));
+        assert_eq!(lines.next(), Some("file\tmode\tfraction\tid1\tid2\ttn93"));
+        lines
+            .map(|line| {
+                let f: Vec<&str> = line.split('\t').collect();
+                assert_eq!(f.len(), 6, "malformed row: {line}");
+                Row {
+                    file: f[0],
+                    mode: f[1],
+                    fraction: (f[2] != "-").then(|| f[2].parse().unwrap()),
+                    id1: f[3],
+                    id2: f[4],
+                    tn93: (f[5] != "NA").then(|| f[5].parse().unwrap()),
+                }
+            })
+            .collect()
+    }
+
+    /// A FASTA file encoded for one configuration.
+    struct Loaded {
+        set: SequenceSet,
+        index: HashMap<&'static str, usize>,
+        seqs: Vec<String>,
+    }
+
+    /// `tn93 -a MODE [-g FRACTION]`.
+    type Config = (&'static str, Option<f64>);
+
+    /// One [`Loaded`] set per file, configuration and `tn93K2pFallback`, built on first use.
+    #[derive(Default)]
+    struct Sets(HashMap<(&'static str, &'static str, Option<u64>, bool), Loaded>);
+
+    impl Sets {
+        fn get(&mut self, file: &'static str, (mode, fraction): Config, k2p: bool) -> &Loaded {
+            self.0.entry((file, mode, fraction.map(f64::to_bits), k2p)).or_insert_with(|| {
+                let text = FILES.iter().find(|(name, _)| *name == file).unwrap_or_else(|| panic!("no file {file}")).1;
+                let records = fasta(text);
+                let index = records.iter().enumerate().map(|(k, (name, _))| (*name, k)).collect();
+                let seqs: Vec<String> = records.into_iter().map(|(_, s)| s).collect();
+                let mode = Ambiguity::parse(mode).unwrap_or_else(|| panic!("unknown mode {mode}"));
+                let options = SetOptions { max_ambiguity_fraction: fraction, tn93_k2p_fallback: k2p };
+                Loaded { set: SequenceSet::with_options(&seqs, mode, options).unwrap(), index, seqs }
+            })
+        }
+    }
+
+    /// Whether the library's `got` agrees with tn93's `want`.
+    fn agrees(got: f64, want: f64) -> bool {
+        if want == 1000.0 {
+            // tn93's TN93_MAX_DIST: the model saturated
+            got == f64::INFINITY
+        } else {
+            (got - want).abs() <= 1e-12 * want.abs().max(1.0)
+        }
+    }
+
+    #[test]
+    fn table_covers_every_mode() {
+        let rows = rows();
+        for mode in ["skip", "resolve", "average", "gapmm"] {
+            let finite = rows.iter().filter(|r| r.mode == mode && r.tn93.is_some_and(|d| d < 1000.0)).count();
+            assert!(finite >= 300, "{mode}: {finite} finite values");
+        }
+    }
+
+    /// With `tn93K2pFallback`, every pair matches tn93. Without it, so does every pair that has
+    /// all four bases; the others drop the TN93 terms that vanish instead of using K2P.
+    #[test]
+    fn sequence_set_matches_tn93() {
+        let mut sets = Sets::default();
+        let (mut checked, mut missing_base) = (0, 0);
+        for row in rows() {
+            let id = format!("{} -a {} -g {:?} {} {}", row.file, row.mode, row.fraction, row.id1, row.id2);
+            let Loaded { set, index, .. } = sets.get(row.file, (row.mode, row.fraction), true);
+            let (i, j) = (index[row.id1], index[row.id2]);
+            let counts = set.tally::<Counts>(i, j, f64::INFINITY).unwrap();
+            let Some(want) = row.tn93 else {
+                assert!(counts.sites <= 1.0, "{id}: tn93 left out a pair with {} sites", counts.sites);
+                continue;
+            };
+            let got = set.pair(Metric::Tn93K2p, i, j);
+            assert!(agrees(got, want), "{id}: with tn93K2pFallback got {got}, tn93 {want}");
+
+            let Loaded { set, seqs, .. } = sets.get(row.file, (row.mode, row.fraction), false);
+            let got = set.pair(Metric::Tn93, i, j);
+            if counts.freq.contains(&0.0) {
+                missing_base += 1;
+                assert_eq!(got.to_bits(), tn93(&counts).to_bits(), "{id}");
+            } else {
+                assert!(agrees(got, want), "{id}: got {got}, tn93 {want}");
+                if row.mode == "skip" {
+                    let single = tn93_distance(&seqs[i], &seqs[j]);
+                    assert!(agrees(single, want), "{id}: tn93_distance gives {single}, tn93 {want}");
+                }
+            }
+            checked += 1;
+        }
+        assert!(checked >= 3100 && missing_base >= 50, "{checked} pairs checked, {missing_base} missing a base");
+    }
+
+    /// `links()` stops scanning a pair early once it cannot pass the threshold; on tn93's own
+    /// values, it must keep exactly the pairs within it.
+    #[test]
+    fn links_keep_the_pairs_tn93_keeps() {
+        let mut sets = Sets::default();
+        let rows = rows();
+        let mut groups: Vec<(&str, &str, Option<f64>)> = rows.iter().map(|r| (r.file, r.mode, r.fraction)).collect();
+        groups.dedup();
+        for (file, mode, fraction) in groups {
+            let Loaded { set, index, .. } = sets.get(file, (mode, fraction), true);
+            for threshold in [0.0, 0.01, 0.03, 0.1, 0.5] {
+                let mut want: Vec<(u32, u32)> = rows
+                    .iter()
+                    .filter(|r| (r.file, r.mode, r.fraction) == (file, mode, fraction))
+                    .map(|r| (index[r.id1], index[r.id2], r.tn93))
+                    .filter(|&(_, _, d)| d.is_some_and(|d| d <= threshold))
+                    .map(|(i, j, _)| (i as u32, j as u32))
+                    .collect();
+                want.sort();
+                let links = set.sparse(Metric::Tn93K2p, threshold, 0..set.len());
+                let got: Vec<(u32, u32)> = links.source.iter().zip(&links.target).map(|(&i, &j)| (i, j)).collect();
+                assert_eq!(got, want, "{file} -a {mode} -g {fraction:?}, threshold {threshold}");
+            }
+        }
+    }
+
+    /// The -g data averages some pairs and resolves others, so both sides of the decision are
+    /// checked: at 0.015 and 0.05, some pairs differ from plain resolve, and some from average.
+    #[test]
+    fn hivtrace_g_cases_take_both_sides() {
+        let rows = rows();
+        let value = |file: &str, a: &str, b: &str, config: Config| {
+            rows.iter()
+                .find(|r| (r.file, r.id1, r.id2, r.mode, r.fraction) == (file, a, b, config.0, config.1))
+                .and_then(|r| r.tn93)
+        };
+        for fraction in [0.015, 0.05] {
+            let (mut averaged, mut resolved) = (0, 0);
+            for r in rows.iter().filter(|r| r.fraction == Some(fraction)) {
+                let (res, avg) = (value(r.file, r.id1, r.id2, ("resolve", None)), value(r.file, r.id1, r.id2, ("average", None)));
+                averaged += (r.tn93 != res && r.tn93 == avg) as u32;
+                resolved += (r.tn93 != avg && r.tn93 == res) as u32;
+            }
+            assert!(averaged >= 20 && resolved >= 20, "-g {fraction}: {averaged} averaged, {resolved} resolved");
         }
     }
 }

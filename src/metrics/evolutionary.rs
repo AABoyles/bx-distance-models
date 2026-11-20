@@ -104,6 +104,13 @@ pub(crate) fn tn93(c: &Counts) -> f64 {
     d.max(0.0)
 }
 
+/// TN93 as HIV-TRACE's tn93 computes it: K2P when a base never occurs in the pair (its
+/// frequency is 0), where [`tn93`] drops the terms that vanish instead. Same `Infinity` on
+/// saturation (tn93 gives 1000) and `NaN` without a compared site.
+pub(crate) fn tn93_or_k2p(c: &Counts) -> f64 {
+    if c.freq.contains(&0.0) { k2p(c) } else { tn93(c) }
+}
+
 pub(crate) fn jc69(m: &Mismatches) -> f64 {
     if m.sites == 0.0 {
         return f64::NAN;

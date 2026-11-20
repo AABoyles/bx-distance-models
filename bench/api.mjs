@@ -67,9 +67,44 @@ if (!flags.includes('--legacy-only') && bx.SequenceSet) {
 
   // Ambiguity fallback: 0.5% of sites are R/Y mixtures in every sequence
   const ambSeqs = makeData({ n, L, ambRate: 0.005 });
-  for (const mode of ['skip', 'resolve', 'average']) {
-    const ambSet = new bx.SequenceSet(ambSeqs, mode);
+  for (const mode of ['skip', 'resolve', 'average', 'gapmm']) {
+    let ambSet;
+    try {
+      ambSet = new bx.SequenceSet(ambSeqs, mode);
+    } catch {
+      continue; // a build without this mode
+    }
     run(`set.distances('tn93'), 0.5% R/Y, ambiguity '${mode}'`, () => ambSet.distances('tn93'));
     ambSet.free();
+  }
+  // tn93 -a resolve -g 0.015, as HIV-TRACE runs it
+  let gSet;
+  try {
+    gSet = new bx.SequenceSet(ambSeqs, 'resolve', { maxAmbiguityFraction: 0.015 });
+  } catch {}
+  if (gSet) {
+    run(`set.distances('tn93'), 0.5% R/Y, resolve -g 0.015`, () => gSet.distances('tn93'));
+    const links = run(`set.links('tn93', 0.015), 0.5% R/Y, resolve -g 0.015`, () => gSet.links('tn93', 0.015));
+    console.log(`${''.padEnd(52)} ${links.length.toLocaleString()} links`);
+    links.free();
+    gSet.free();
+  }
+
+  // Gaps and N compared as ambiguity codes: every sequence has ragged gap ends and some N
+  let gapSet;
+  try {
+    gapSet = new bx.SequenceSet(seqs, 'gapmm');
+  } catch {}
+  if (gapSet) {
+    console.log(`'gapmm': ${gapSet.ambiguous_count()} of ${n} sequences hold a gap or N`);
+    for (const metric of ['hamming', 'tn93']) {
+      run(`set.distances('${metric}'), ambiguity 'gapmm'`, () => gapSet.distances(metric));
+    }
+    for (const [metric, threshold] of [['tn93', 0.015], ['tn93', 0.05]]) {
+      const links = run(`set.links('${metric}', ${threshold}), ambiguity 'gapmm'`, () => gapSet.links(metric, threshold));
+      console.log(`${''.padEnd(52)} ${links.length.toLocaleString()} links`);
+      links.free();
+    }
+    gapSet.free();
   }
 }

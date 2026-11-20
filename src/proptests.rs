@@ -8,13 +8,13 @@ use proptest::prelude::*;
 use crate::counts::{Counts, CountsWithGc, Mismatches};
 use crate::encoding::{Ambiguity, IUPAC};
 use crate::metrics::{self, Metric};
-use crate::sequence_set::{row_splits, Links, SequenceSet};
+use crate::sequence_set::{row_splits, Links, SequenceSet, SetOptions};
 
-const ALL: [Metric; 10] = [
+const ALL: [Metric; 11] = [
     Metric::Snps, Metric::Hamming, Metric::PDistance, Metric::Jc69, Metric::K2p,
-    Metric::Tn92, Metric::Tn93, Metric::Transitions, Metric::Transversions, Metric::TsTvRatio,
+    Metric::Tn92, Metric::Tn93, Metric::Tn93K2p, Metric::Transitions, Metric::Transversions, Metric::TsTvRatio,
 ];
-const MODES: [Ambiguity; 3] = [Ambiguity::Skip, Ambiguity::Resolve, Ambiguity::Average];
+const MODES: [Ambiguity; 4] = [Ambiguity::Skip, Ambiguity::Resolve, Ambiguity::Average, Ambiguity::GapMm];
 /// Characters substituted into sequences: bases in either case, U, gaps, N, every partial
 /// ambiguity code and characters that are not nucleotides at all.
 const NOISE: &[u8] = b"ACGTacgtUu--NnRYSWKMBDHVrykm?.*X";
@@ -51,11 +51,21 @@ fn sequence_set() -> impl Strategy<Value = Vec<String>> {
 }
 
 /// Per-site reference: one IUPAC lookup per site, no bit planes, no sparse ambiguity lists.
+/// Follows tn93's `computeTN93`: N is an ambiguity code where the mode compares it, and in GapMM
+/// mode a gap facing anything but a gap is an N.
 fn reference_counts(a: &str, b: &str, mode: Ambiguity) -> CountsWithGc {
     let mut c = CountsWithGc::default();
     for (&x, &y) in a.as_bytes().iter().zip(b.as_bytes()) {
-        let (cx, cy) = (IUPAC[x as usize], IUPAC[y as usize]);
-        if cx == 0 || cy == 0 || cx == 15 || cy == 15 {
+        let (mut cx, mut cy) = (IUPAC[x as usize], IUPAC[y as usize]);
+        if !mode.compares_n() {
+            cx = if cx == 15 { 0 } else { cx };
+            cy = if cy == 15 { 0 } else { cy };
+        }
+        if mode.gap_is_n() && (cx != 0 || cy != 0) {
+            cx = if cx == 0 { 15 } else { cx };
+            cy = if cy == 0 { 15 } else { cy };
+        }
+        if cx == 0 || cy == 0 {
             continue;
         }
         if cx.count_ones() == 1 && cy.count_ones() == 1 {
@@ -65,6 +75,33 @@ fn reference_counts(a: &str, b: &str, mode: Ambiguity) -> CountsWithGc {
         }
     }
     c
+}
+
+/// tn93 `-a resolve -g fraction` for one pair, per site: resolved, unless the sites resolution
+/// touched (`ambig_count` in `computeTN93`: a base facing a code that contains it, or two
+/// ambiguity codes) are at least `fraction` of the compared sites; then averaged.
+fn reference_max_ambiguity(a: &str, b: &str, fraction: f64) -> CountsWithGc {
+    let (mut sites, mut ambiguous) = (0u32, 0u32);
+    for (&x, &y) in a.as_bytes().iter().zip(b.as_bytes()) {
+        let (cx, cy) = (IUPAC[x as usize], IUPAC[y as usize]);
+        if cx == 0 || cy == 0 {
+            continue;
+        }
+        sites += 1;
+        let (ax, ay) = (cx.count_ones() > 1, cy.count_ones() > 1);
+        ambiguous += ((ax || ay) && (cx & cy != 0 || (ax && ay))) as u32;
+    }
+    let too_ambiguous = fraction < 1.0 && sites as f64 * fraction <= ambiguous as f64;
+    reference_counts(a, b, if too_ambiguous { Ambiguity::Average } else { Ambiguity::Resolve })
+}
+
+/// Every configuration a set can be built with: each mode, and resolve with a maximum
+/// ambiguity fraction.
+fn config() -> impl Strategy<Value = (Ambiguity, Option<f64>)> {
+    prop_oneof![
+        prop::sample::select(MODES.to_vec()).prop_map(|m| (m, None)),
+        prop_oneof![Just(0.0), Just(0.015), 0.0..0.2f64, Just(1.0)].prop_map(|f| (Ambiguity::Resolve, Some(f))),
+    ]
 }
 
 fn near(x: f64, y: f64) -> bool {
@@ -88,6 +125,7 @@ fn single_pair(metric: Metric, a: &str, b: &str) -> f64 {
         Metric::K2p => k2p_distance(a, b),
         Metric::Tn92 => tn92_distance(a, b),
         Metric::Tn93 => tn93_distance(a, b),
+        Metric::Tn93K2p => tn93_or_k2p(&Counts::from_strs(a, b)),
         Metric::Transitions => transitions_count(a, b),
         Metric::Transversions => transversions_count(a, b),
         Metric::TsTvRatio => ts_tv_ratio(a, b),
@@ -95,7 +133,7 @@ fn single_pair(metric: Metric, a: &str, b: &str) -> f64 {
 }
 
 fn is_distance(metric: Metric) -> bool {
-    matches!(metric, Metric::Hamming | Metric::PDistance | Metric::Jc69 | Metric::K2p | Metric::Tn92 | Metric::Tn93)
+    matches!(metric, Metric::Hamming | Metric::PDistance | Metric::Jc69 | Metric::K2p | Metric::Tn92 | Metric::Tn93 | Metric::Tn93K2p)
 }
 
 proptest! {
@@ -257,11 +295,12 @@ proptest! {
         seqs in sequence_set(),
         metric in prop::sample::select(ALL.to_vec()),
         threshold in prop_oneof![0.0..0.3f64, 0.0..20.0f64, Just(0.0), Just(f64::INFINITY)],
-        mode in prop::sample::select(MODES.to_vec()),
+        (mode, fraction) in config(),
         start in any::<prop::sample::Index>(),
     ) {
         let n = seqs.len();
-        let set = SequenceSet::from_strs(&seqs, mode);
+        let options = SetOptions { max_ambiguity_fraction: fraction, ..SetOptions::default() };
+        let set = SequenceSet::with_options(&seqs, mode, options).unwrap();
         let rows = start.index(n + 1)..n;
         let dense = set.dense(&[metric], rows.clone());
         let mut want = Links::default();
@@ -277,5 +316,27 @@ proptest! {
             }
         }
         prop_assert_eq!(set.sparse(metric, threshold, rows), want);
+    }
+
+    /// With a maximum ambiguity fraction, each pair is what the per-site reference resolves or
+    /// averages, as tn93 decides, at every scan level.
+    #[test]
+    fn max_ambiguity_fraction_resolves_or_averages_like_tn93(
+        seqs in sequence_set(),
+        fraction in prop_oneof![Just(0.0), Just(0.015), 0.0..0.2f64, Just(1.0)],
+    ) {
+        let options = SetOptions { max_ambiguity_fraction: Some(fraction), ..SetOptions::default() };
+        let set = SequenceSet::with_options(&seqs, Ambiguity::Resolve, options).unwrap();
+        for i in 0..seqs.len() {
+            for j in 0..seqs.len() {
+                let (a, b) = (&seqs[i], &seqs[j]);
+                let want = reference_max_ambiguity(a, b, fraction);
+                let full = set.tally::<CountsWithGc>(i, j, f64::INFINITY).unwrap();
+                prop_assert!(near_counts(&full, &want), "-g {fraction} {i},{j}\n{a}\n{b}\n{full:?}\n{want:?}");
+                prop_assert_eq!(set.tally::<Counts>(i, j, f64::INFINITY).unwrap(), full.counts);
+                let light = set.tally::<Mismatches>(i, j, f64::INFINITY).unwrap();
+                prop_assert!(near(light.sites, full.counts.sites) && near(light.mismatches, full.counts.mismatches()));
+            }
+        }
     }
 }

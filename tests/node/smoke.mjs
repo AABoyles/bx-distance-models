@@ -70,10 +70,58 @@ check('ambiguity modes', () => {
   assert.equal(average.distance('transitions', 0, 2), 0.5);
   resolve.free();
   average.free();
+
+  // GapMM: a gap facing a base is an N (3/4 mismatch, 3 such sites); gap facing gap is skipped
+  const gapmm = new bx.SequenceSet(['ACGT-', 'AC--A', 'ACGT-'], 'gapmm');
+  assert.equal(gapmm.ambiguous_count(), 3);
+  assert.equal(gapmm.distance('snps', 0, 1), 2.25);
+  assert.equal(gapmm.distance('hamming', 0, 1), 2.25 / 5);
+  assert.equal(gapmm.distance('snps', 0, 2), 0);
+  assert.ok(gapmm.distance('tn93', 0, 1) > 0);
+  gapmm.free();
+
+  // N and ? are any base outside skip mode: a match when resolved, 3/4 mismatch when averaged
+  const withN = ['ACGTA', 'ACGNA', 'AC?TA'];
+  const nSkip = new bx.SequenceSet(withN);
+  const nResolve = new bx.SequenceSet(withN, 'resolve');
+  const nAverage = new bx.SequenceSet(withN, 'average');
+  assert.equal(nSkip.ambiguous_count(), 0);
+  assert.equal(nResolve.ambiguous_count(), 2);
+  assert.equal(nSkip.distance('hamming', 0, 1), 0);
+  assert.equal(nResolve.distance('hamming', 0, 1), 0);
+  assert.equal(nResolve.distance('hamming', 0, 2), 0);
+  assert.equal(nAverage.distance('snps', 0, 1), 0.75);
+  assert.equal(nAverage.distance('hamming', 0, 2), 0.75 / 5);
+  [nSkip, nResolve, nAverage].forEach(s => s.free());
+
+  // tn93 -a resolve -g F: R facing A is 1 resolved site of 10, so averaged at 0.1, resolved above
+  const gSeqs = ['ACGTACGTAC', 'RCGTACGTAC'];
+  const g = f => new bx.SequenceSet(gSeqs, 'resolve', { maxAmbiguityFraction: f });
+  const [low, high] = [g(0.1), g(0.11)];
+  assert.equal(low.distance('snps', 0, 1), 0.5);
+  assert.equal(high.distance('snps', 0, 1), 0);
+  assert.equal(low.links('snps', 0).length, 0);
+  assert.equal(high.links('snps', 0).length, 1);
+  [low, high].forEach(s => s.free());
+  new bx.SequenceSet(gSeqs, 'resolve', {}).free();
+
+  // tn93K2pFallback: a pair with only A and T uses K2P, as tn93 does
+  const atSeqs = ['ATTAATATTA', 'ATTAATTTTA'];
+  const [plain, k2pFallback] = [new bx.SequenceSet(atSeqs), new bx.SequenceSet(atSeqs, 'skip', { tn93K2pFallback: true })];
+  assert.equal(k2pFallback.distance('tn93', 0, 1), plain.distance('k2p', 0, 1));
+  assert.notEqual(plain.distance('tn93', 0, 1), plain.distance('k2p', 0, 1));
+  assert.deepEqual(Array.from(k2pFallback.links('tn93', 10).distance), [plain.distance('k2p', 0, 1)]);
+  [plain, k2pFallback].forEach(s => s.free());
+  new bx.SequenceSet(gSeqs, 'resolve', { maxAmbiguityFraction: undefined }).free();
 });
 
 check('errors are thrown as JS errors', () => {
   assert.throws(() => new bx.SequenceSet(seqs, 'bogus'), /unknown ambiguity mode/);
+  assert.throws(() => new bx.SequenceSet(seqs, 'resolve', { maxAmbiguity: 0.1 }), /unknown option 'maxAmbiguity'/);
+  assert.throws(() => new bx.SequenceSet(seqs, 'average', { maxAmbiguityFraction: 0.1 }), /needs ambiguity mode 'resolve'/);
+  assert.throws(() => new bx.SequenceSet(seqs, 'resolve', { maxAmbiguityFraction: 2 }), /between 0 and 1/);
+  assert.throws(() => new bx.SequenceSet(seqs, 'resolve', { maxAmbiguityFraction: '0.1' }), /must be a number/);
+  assert.throws(() => new bx.SequenceSet(seqs, 'skip', { tn93K2pFallback: 1 }), /must be a boolean/);
   assert.throws(() => set.distances('bogus'), /unknown metric/);
   assert.throws(() => set.distances('tn93', 3, 2), /invalid row range/);
   assert.throws(() => set.distance('tn93', 0, n), /out of range/);

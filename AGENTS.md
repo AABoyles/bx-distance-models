@@ -23,11 +23,12 @@ bx-distance-models/
 │   │   ├── evolutionary.rs       # TN93, JC69, K2P, T92 (as tn92)
 │   │   └── diagnostics.rs        # Transitions/transversions/ratios
 │   ├── tests.rs                  # Unit tests (incl. bit-for-bit check against the old kernels)
-│   ├── reference_tests.rs        # Checks against ape::dist.dna (table in tests/reference/)
+│   ├── reference_tests.rs        # Checks against ape::dist.dna and HIV-TRACE's tn93 (tables in tests/reference/)
 │   └── proptests.rs              # Property-based tests (proptest): kernels vs per-site reference, invariants
 ├── tests/
 │   ├── node/smoke.mjs            # JS binding checks against a Node build (npm run test:node)
-│   └── reference/                # generate.R (R + ape) → ape_distances.tsv, read by reference_tests.rs
+│   └── reference/                # generate.R (R + ape) → ape_distances.tsv; tn93/generate.py (builds
+│                                 # veg/tn93) + tn93/*.fasta → tn93_distances.tsv; read by reference_tests.rs
 ├── .github/workflows/            # ci.yml (clippy, tests, wasm build, Node checks, bench drivers);
 │                                 # reference.yml (regenerates the ape table when it changes)
 ├── bench/                        # Benchmark harness (see bench/README.md)
@@ -50,12 +51,17 @@ bx-distance-models/
 - All public functions are automatically available in JavaScript
 
 ### `encoding.rs` - Sequence Encodings
-- `IUPAC[byte]` → 4-bit base set (A=1 C=2 G=4 T=8, N=15, 0 = not a nucleotide); case-insensitive, U = T
+- `IUPAC[byte]` → 4-bit base set (A=1 C=2 G=4 T=8, N and ? = 15 = `ANY`, 0 = not a nucleotide);
+  case-insensitive, U = T
 - `BASE[byte]` → 2-bit base index (A=0 C=1 G=2 T=3) or 4 for anything else
 - `Encoded`: per sequence, `[lo, hi, valid]` bit-planes per 64 sites (A=00 C=01 G=10 T=11, low bit = pyrimidine)
 - `AmbiguityCodes`: only for sequences with partial ambiguity codes, and only when the set tracks them:
   a mask plus a sorted list of (position, IUPAC code)
-- `Ambiguity`: `Skip` (default), `Resolve`, `Average`
+- `FullWord` plane (`Encoded::full`, `[any, n]` per word, plus `full_index` of the non-zero words):
+  sites compared as `N` (`N`/`?` where the mode compares them, gaps in GapMM). Dense, not sparse:
+  gaps and N are common, and a base facing one contributes a fixed row, so they are popcounted
+- `Ambiguity`: `Skip` (default), `Resolve`, `Average`, `GapMm` (tn93's `-a` modes);
+  `compares_n()` / `gap_is_n()` say which sites become ambiguity codes
 
 ### `counts.rs` - Counting Kernels
 - `Counts { sites, ts_purine, ts_pyrimidine, transversions, freq: [A, C, G, T] }` (f64; fractional with ambiguity)
@@ -69,15 +75,27 @@ bx-distance-models/
   ~10 / ~11 `popcount`s per 64 sites; optional early exit on a mismatch bound
 - `Counts::from_strs()` / `CountsWithGc::from_strs()` / `Mismatches::from_strs()` → string kernels
   for the single-pair functions (no branches on bases)
-- `Resolutions` + `add_ambiguous_sites()` → ambiguity fallback, visiting only the sparse ambiguous sites
-- `count_pair::<T>()` → fast kernel, plus the fallback when either sequence carries ambiguity codes
+- `Resolutions` → per (code, code) contribution under the mode, codes 1..=15 (N included)
+- `Tally::add_full_sites()` → base vs `N` and `N` vs `N` sites from the `FullWord` planes (per-base
+  popcounts × table entries), visiting only words where either sequence has one
+- `add_ambiguous_sites()` → partial codes (R, Y, ...), visiting only the sparse ambiguous sites
+- `Comparison` → the mode's `Resolutions`, plus `(fraction, average table)` for tn93's
+  `-a resolve -g` (`maxAmbiguityFraction`). The passes then count compared and "resolved" sites
+  (`Visited`, `counts_as_ambiguous`: base in code, or code vs code) as integers, only in that case
+  (`const COUNT`); a pair at or over the fraction is redone with the average table on top of the
+  same bit-plane counts
+- `count_pair::<T>()` → fast kernel, plus both passes (one out-of-line call) when either sequence
+  has a compared ambiguity code. The dense row loop skips even that check in skip mode: an untaken
+  per-pair branch there cost the ~30 ns/pair `Mismatches` scan ~10%
 
 ### `metrics/*.rs` - Metric Formulas
 - Each metric has a `pub(crate) fn name(c: &Counts) -> f64` formula (`&Mismatches` for SNPs,
   Hamming/p-distance and JC69, `&CountsWithGc` for T92) and a `#[wasm_bindgen]` string wrapper
   (`name_distance(seq1, seq2)` etc.) that calls it via the matching `from_strs`
 - `basic.rs`: SNPs (count), Hamming / p-distance (identical, proportion [0, 1])
-- `evolutionary.rs`: TN93, JC69, K2P, T92 (Tamura 1992, exposed as `tn92`). Uncapped
+- `evolutionary.rs`: TN93, JC69, K2P, T92 (Tamura 1992, exposed as `tn92`); `tn93_or_k2p` is TN93
+  with tn93's K2P fallback when a base frequency is 0 (`Metric::Tn93K2p`, which has no name of its
+  own: the `tn93K2pFallback` set option maps `"tn93"` to it in `SequenceSet::metric`). Uncapped
   substitutions per site; `f64::INFINITY` when a log argument would be non-positive, or is within
   rounding of zero (`<= SATURATION`, 1e-12: exact boundary pairs otherwise gave ~19). Zero-weight
   terms of degenerate base compositions drop out (`ratio`/`weighted_ln`) instead of becoming NaN
@@ -88,7 +106,8 @@ bx-distance-models/
   plus SNPs). `eval()` panics for T92, which must go through `eval_with_gc()`
 
 ### `sequence_set.rs` - Batch API
-- `SequenceSet::new(seqs, ambiguity?)` encodes once; `distances()` (dense, typed array), `links()`
+- `SequenceSet::new(seqs, ambiguity?, options?)` encodes once (`SetOptions`: `maxAmbiguityFraction`;
+  unknown keys are errors; `with_options` is the native-testable constructor); `distances()` (dense, typed array), `links()`
   (thresholded, with early exit), `distance()`, `row_splits()`
 - All batch methods take an optional row range; pair order is the row-major upper triangle
 - Dense output is written into the JS `Float64Array` row by row (no second full-size copy)
@@ -110,10 +129,16 @@ bx-distance-models/
 - Parameters: `&str` for sequences (automatically converted from JS strings)
 
 ### Gap/Ambiguity Handling
-- One rule for every metric: compare only sites where both sequences hold A/C/G/T (any case,
-  U = T); everything else is skipped and not counted in the denominator
-- Partial IUPAC codes are skipped by default; `SequenceSet` with `"resolve"`/`"average"` resolves them
-- `N` is always skipped
+- One rule for every metric, and the reference for it is HIV-TRACE's `tn93` (`tn93_shared.cc`):
+  by default compare only sites where both sequences hold A/C/G/T (any case, U = T); everything
+  else is skipped and not counted in the denominator
+- Partial IUPAC codes are skipped by default; `SequenceSet` with `"resolve"`/`"average"`/`"gapmm"`
+  resolves them, and `N`/`?` as fourfold codes (any base), as tn93 does. Skip mode and the
+  single-pair functions skip `N`
+- `"gapmm"`: a gap (or any non-nucleotide) facing a non-gap is an `N`
+- Known differences from tn93: its reader drops characters outside `ACGTURYSWKMBDHVN?-` (here they
+  are gaps); it reads `U` as a separate code (here `U` = `T`); with a base missing from a pair it
+  uses K2P (here the vanishing TN93 terms drop out, unless `tn93K2pFallback`)
 
 ### Performance Optimizations
 - Encode once, compare many times: 3 bits per site, 64 sites per `u64` word
@@ -155,6 +180,8 @@ src/*.rs → wasm-pack → pkg/
 - `PROPTEST_CASES=10000 cargo test --release proptests` → longer property-test search
 - `cargo clippy --all-targets -- -D warnings` → lint as CI does (also `--target wasm32-unknown-unknown`)
 - `Rscript tests/reference/generate.R` → regenerate the ape reference table (needs R + `ape`)
+- `python3 tests/reference/tn93/generate.py` → regenerate the tn93 table (builds veg/tn93 at a
+  pinned commit; needs git, cmake, a C++ compiler; or `TN93=/path/to/tn93`)
 - `npm run test:node` → build for Node and check the JS bindings
 - `npm run bench:build` then `npm run bench:kernels` / `bench:api` / `bench:workers` → benchmarks (see `bench/README.md`)
 
@@ -203,12 +230,17 @@ src/*.rs → wasm-pack → pkg/
   fixed-seed random sets
 - `reference_tests.rs`: every pair in `tests/reference/ape_distances.tsv`, through both the string
   functions and `SequenceSet`. NA cells are cases ape scores differently by design (see the R
-  script's header); saturated models are NaN in ape and `Infinity` here
-- `proptests.rs`: generated sets of related sequences in all three ambiguity modes; failures shrink
-  to a minimal input. With integer counts (skip mode) checks are bit for bit; with fractional
-  counts (resolve/average) they allow rounding, since summation order differs between scan levels
+  script's header); saturated models are NaN in ape and `Infinity` here. Also every pair in
+  `tests/reference/tn93_distances.tsv` (TN93 in every ambiguity mode, from HIV-TRACE's tn93) through
+  `SequenceSet`, and `links()` at several thresholds against tn93's values. tn93's 1000 (saturated)
+  is `Infinity` here; NA is a pair tn93 leaves out (at most one compared site)
+- `proptests.rs`: generated sets of related sequences in every ambiguity mode, against a per-site
+  reference that follows `computeTN93`; failures shrink to a minimal input. With integer counts
+  (skip mode) checks are bit for bit; with fractional counts they allow rounding, since summation
+  order differs between scan levels
 - `tests/node/smoke.mjs`: the wasm-bindgen surface (`npm run test:node`)
-- CI (`.github/workflows/ci.yml`) runs all of the above plus clippy and the benchmark drivers
+- CI (`.github/workflows/ci.yml`) runs all of the above plus clippy and the benchmark drivers;
+  `reference.yml` regenerates both reference tables and fails if they differ from the committed ones
 
 ## File I/O & State
 - **No file I/O**: Pure computation library

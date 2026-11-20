@@ -1,7 +1,9 @@
 name: Reference table
 
-# Checks that tests/reference/ape_distances.tsv is what tests/reference/generate.R produces, so the
-# table cannot drift from the script. Runs when either changes.
+# Checks that the reference tables are what their scripts produce, so they cannot drift:
+# tests/reference/ape_distances.tsv from generate.R (R + ape), and tests/reference/tn93_distances.tsv
+# (with tests/reference/tn93/random.fasta) from tn93/generate.py (HIV-TRACE's tn93, built from
+# source). Runs when any of them changes.
 on:
   push:
     branches: [main]
@@ -28,3 +30,13 @@ jobs:
           git show HEAD:tests/reference/ape_distances.tsv | tail -n +2 > committed.tsv
           tail -n +2 tests/reference/ape_distances.tsv > regenerated.tsv
           diff -u committed.tsv regenerated.tsv
+
+  tn93:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Builds tn93 at the pinned commit (git, cmake and a C++ compiler are on the runner)
+      - name: Regenerate
+        run: python3 tests/reference/tn93/generate.py
+      - name: Compare with the committed table and data
+        run: git diff --exit-code -- tests/reference/tn93_distances.tsv tests/reference/tn93/

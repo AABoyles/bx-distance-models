@@ -4,7 +4,7 @@ mod tests {
     use crate::counts::{Counts, CountsWithGc, Mismatches};
     use crate::encoding::{Ambiguity, IUPAC};
     use crate::metrics::{self, Metric, Scan};
-    use crate::sequence_set::{pairs_in_rows, row_splits, Links, SequenceSet};
+    use crate::sequence_set::{pairs_in_rows, row_splits, Links, SequenceSet, SetOptions};
 
     #[test]
     fn test_hamming_identical() {
@@ -330,6 +330,7 @@ mod tests {
             Metric::Transitions => legacy::transitions(a, b),
             Metric::Transversions => legacy::transversions(a, b),
             Metric::TsTvRatio => legacy::ts_tv(a, b),
+            Metric::Tn93K2p => unreachable!("the old implementation had no K2P fallback"),
         }
     }
 
@@ -584,11 +585,161 @@ mod tests {
     }
 
     #[test]
-    fn n_and_gaps_are_never_compared() {
-        for mode in [Ambiguity::Skip, Ambiguity::Resolve, Ambiguity::Average] {
-            let c = set_counts("ANR-T", "ARNRT", mode);
-            assert_eq!(c.sites, 2.0, "{mode:?}");
+    fn gaps_are_not_compared_outside_gapmm_nor_n_in_skip_mode() {
+        // A/A, N/R, R/N, -/R, T/T: N is an ambiguity code wherever ambiguity codes are compared
+        assert_eq!(set_counts("ANR-T", "ARNRT", Ambiguity::Skip).sites, 2.0);
+        for mode in [Ambiguity::Resolve, Ambiguity::Average] {
+            assert_eq!(set_counts("ANR-T", "ARNRT", mode).sites, 4.0, "{mode:?}");
         }
+        assert_eq!(set_counts("ANR-T", "ARNRT", Ambiguity::GapMm).sites, 5.0);
+    }
+
+    #[test]
+    fn n_and_question_mark_are_any_base_when_resolving() {
+        // tn93 -a resolve: N facing A counts as a match (A-A += 1)
+        for n in ["N", "n", "?"] {
+            let c = set_counts_with_gc(n, "A", Ambiguity::Resolve);
+            assert_eq!((c.counts.sites, c.counts.mismatches(), c.counts.freq, c.gc1), (1.0, 0.0, [2.0, 0.0, 0.0, 0.0], 0.0));
+            // N facing R: resolved to the shared bases, half A-A and half G-G
+            let c = set_counts(n, "R", Ambiguity::Resolve);
+            assert_eq!((c.sites, c.mismatches(), c.freq), (1.0, 0.0, [1.0, 0.0, 1.0, 0.0]));
+        }
+        // tn93 -a average: N facing A adds 1/4 to each of A-A, A-C, A-G and A-T
+        let c = set_counts_with_gc("A", "N", Ambiguity::Average);
+        assert_eq!((c.counts.sites, c.counts.ts_purine, c.counts.transversions), (1.0, 0.25, 0.5));
+        assert_eq!((c.counts.freq, c.gc1), ([1.25, 0.25, 0.25, 0.25], 0.0));
+        // Skip mode is unchanged: N is not compared
+        assert_eq!(set_counts("N?", "AC", Ambiguity::Skip).sites, 0.0);
+    }
+
+    #[test]
+    fn gapmm_compares_a_gap_facing_a_base_as_n() {
+        // N vs A: a quarter each of A-A, C-A, G-A, T-A
+        let c = set_counts_with_gc("-", "A", Ambiguity::GapMm);
+        assert_eq!((c.counts.sites, c.counts.ts_purine, c.counts.transversions), (1.0, 0.25, 0.5));
+        assert_eq!((c.counts.freq, c.gc1), ([1.25, 0.25, 0.25, 0.25], 0.5));
+        // Either side; '.', 'X' and other non-nucleotides are gaps too
+        for (a, b) in [("A", "-"), ("A", "."), ("A", "X"), ("a", "*")] {
+            let c = set_counts_with_gc(a, b, Ambiguity::GapMm);
+            assert_eq!((c.counts.sites, c.counts.freq, c.gc1), (1.0, [1.25, 0.25, 0.25, 0.25], 0.0), "{a} {b}");
+        }
+        // Gap vs gap is skipped
+        assert_eq!(set_counts("-.X", "-.-", Ambiguity::GapMm).sites, 0.0);
+    }
+
+    #[test]
+    fn gapmm_compares_n_and_question_mark_as_any_base() {
+        // N vs N, ? vs gap: 1/16 of every pair of bases
+        for (a, b) in [("N", "N"), ("?", "-"), ("-", "n")] {
+            let c = set_counts_with_gc(a, b, Ambiguity::GapMm);
+            assert_eq!((c.counts.sites, c.counts.ts_purine, c.counts.ts_pyrimidine), (1.0, 0.125, 0.125), "{a} {b}");
+            assert_eq!((c.counts.transversions, c.counts.freq, c.gc1), (0.5, [0.5; 4], 0.5), "{a} {b}");
+        }
+        // R vs gap is R vs N: 1/8 of each of A or G against each base
+        let c = set_counts("R", "-", Ambiguity::GapMm);
+        assert_eq!((c.sites, c.ts_purine, c.transversions, c.freq), (1.0, 0.25, 0.5, [0.75, 0.25, 0.75, 0.25]));
+        // Everything else averages, as in average mode
+        assert_eq!(set_counts("RYB", "AAA", Ambiguity::GapMm), set_counts("RYB", "AAA", Ambiguity::Average));
+    }
+
+    #[test]
+    fn gapmm_serves_every_metric() {
+        // 4 sites: 2 matches, A vs gap (3/4 mismatch), G vs N (3/4 mismatch)
+        let set = SequenceSet::from_strs(&["ACAG", "AC-N"], Ambiguity::GapMm);
+        assert_eq!(set.pair(Metric::Snps, 0, 1), 1.5);
+        assert_eq!(set.pair(Metric::Hamming, 0, 1), 1.5 / 4.0);
+        assert_eq!(set.pair(Metric::PDistance, 0, 1), 1.5 / 4.0);
+        assert_eq!(set.pair(Metric::Transitions, 0, 1), 0.5);
+        assert_eq!(set.pair(Metric::Transversions, 0, 1), 1.0);
+        assert_eq!(set.pair(Metric::TsTvRatio, 0, 1), 0.5);
+        let c = set.tally::<CountsWithGc>(0, 1, f64::INFINITY).unwrap();
+        for metric in [Metric::Jc69, Metric::K2p, Metric::Tn92, Metric::Tn93] {
+            let want = metric.eval_with_gc(&c);
+            assert!(want.is_finite() && want > 0.0, "{metric:?}: {want}");
+            assert_eq!(set.pair(metric, 0, 1).to_bits(), want.to_bits(), "{metric:?}");
+        }
+        // Ambiguity::parse accepts the name in any case
+        assert_eq!(Ambiguity::parse("GapMM"), Some(Ambiguity::GapMm));
+    }
+
+    fn max_fraction(seqs: &[&str], fraction: f64) -> SequenceSet {
+        let options = SetOptions { max_ambiguity_fraction: Some(fraction), ..SetOptions::default() };
+        SequenceSet::with_options(seqs, Ambiguity::Resolve, options).unwrap()
+    }
+
+    #[test]
+    fn max_ambiguity_fraction_averages_too_ambiguous_pairs() {
+        // R facing A resolves to a match: 1 resolved site of 10
+        let seqs = ["ACGTACGTAC", "RCGTACGTAC"];
+        let resolved = set_counts(seqs[0], seqs[1], Ambiguity::Resolve);
+        let averaged = set_counts(seqs[0], seqs[1], Ambiguity::Average);
+        assert_ne!(resolved, averaged);
+        let at = |f: f64| max_fraction(&seqs, f).tally::<Counts>(0, 1, f64::INFINITY).unwrap();
+        // tn93 averages when sites * fraction <= resolved sites: 10 * 0.1 <= 1
+        assert_eq!(at(0.1), averaged);
+        assert_eq!(at(0.11), resolved);
+        // 0 always averages; 1 never does (tn93 only applies -g below 1)
+        assert_eq!(at(0.0), averaged);
+        assert_eq!(at(1.0), resolved);
+        // Without ambiguity codes there is nothing to decide
+        let plain = max_fraction(&["ACGT", "ACGA"], 0.0).tally::<Counts>(0, 1, f64::INFINITY).unwrap();
+        assert_eq!(plain, set_counts("ACGT", "ACGA", Ambiguity::Skip));
+    }
+
+    #[test]
+    fn max_ambiguity_fraction_counts_resolved_sites_as_tn93_does() {
+        // Site 0: R facing A, resolved (counts). Site 9: R facing C, shares no base, so averaged
+        // either way (does not count). 1 of 10 sites at 0.15: resolved. Counting every site
+        // holding a partial code instead (2 of 10) would average this pair.
+        let seqs = ["ACGTACGTAC", "RCGTACGTAR"];
+        let got = max_fraction(&seqs, 0.15).tally::<Counts>(0, 1, f64::INFINITY).unwrap();
+        assert_eq!(got, set_counts(seqs[0], seqs[1], Ambiguity::Resolve));
+        assert_ne!(got, set_counts(seqs[0], seqs[1], Ambiguity::Average));
+        // Two ambiguity codes count whether or not they share a base (R vs Y, site 0), and N
+        // counts like any other code (N facing G, site 2): 2 of 10 sites, averaged at 0.2
+        let seqs = ["RCNTACGTAC", "YCGTACGTAC"];
+        let got = max_fraction(&seqs, 0.2).tally::<Counts>(0, 1, f64::INFINITY).unwrap();
+        assert_eq!(got, set_counts(seqs[0], seqs[1], Ambiguity::Average));
+        let got = max_fraction(&seqs, 0.21).tally::<Counts>(0, 1, f64::INFINITY).unwrap();
+        assert_eq!(got, set_counts(seqs[0], seqs[1], Ambiguity::Resolve));
+    }
+
+    #[test]
+    fn max_ambiguity_fraction_is_validated() {
+        let with = |mode, f| SequenceSet::with_options(&["ACGT"], mode, SetOptions { max_ambiguity_fraction: Some(f), ..SetOptions::default() });
+        assert!(with(Ambiguity::Resolve, 0.015).is_ok());
+        for mode in [Ambiguity::Skip, Ambiguity::Average, Ambiguity::GapMm] {
+            let err = with(mode, 0.015).err().unwrap();
+            assert!(err.contains("maxAmbiguityFraction needs ambiguity mode 'resolve'"), "{err}");
+        }
+        for f in [-0.1, 1.5, f64::NAN] {
+            assert!(with(Ambiguity::Resolve, f).err().unwrap().contains("between 0 and 1"), "{f}");
+        }
+    }
+
+    #[test]
+    fn tn93_k2p_fallback_uses_k2p_only_when_a_base_never_occurs() {
+        use metrics::evolutionary::{k2p, tn93};
+        // 0-1: only A and T (K2P); 2-3: all four bases (TN93); 4: nothing comparable with 0
+        let seqs = ["ATTAATATTA", "ATTAATTTTA", "ACGTACGTAC", "ACGTACGTAA", "----------"];
+        let options = SetOptions { tn93_k2p_fallback: true, ..SetOptions::default() };
+        let set = SequenceSet::with_options(&seqs, Ambiguity::Skip, options).unwrap();
+        assert_eq!(set.metric("tn93"), Ok(Metric::Tn93K2p));
+        assert_eq!(set.metric("k2p"), Ok(Metric::K2p));
+        assert_eq!(SequenceSet::from_strs(&seqs, Ambiguity::Skip).metric("TN93"), Ok(Metric::Tn93));
+
+        let c = set.tally::<Counts>(0, 1, f64::INFINITY).unwrap();
+        assert_eq!(c.freq[1], 0.0);
+        let (fallback, dropped) = (set.pair(Metric::Tn93K2p, 0, 1), set.pair(Metric::Tn93, 0, 1));
+        assert_eq!(fallback.to_bits(), k2p(&c).to_bits());
+        assert_eq!(dropped.to_bits(), tn93(&c).to_bits());
+        assert!(fallback.is_finite() && dropped.is_finite() && fallback != dropped);
+
+        assert_eq!(set.pair(Metric::Tn93K2p, 2, 3).to_bits(), set.pair(Metric::Tn93, 2, 3).to_bits());
+        assert!(set.pair(Metric::Tn93K2p, 0, 4).is_nan());
+        // Saturated K2P (every site a transversion) is Infinity, as without the option
+        let set = SequenceSet::with_options(&["AAAA", "TTTT"], Ambiguity::Skip, options).unwrap();
+        assert_eq!(set.pair(Metric::Tn93K2p, 0, 1), f64::INFINITY);
     }
 
     #[test]
@@ -601,13 +752,18 @@ mod tests {
         }
     }
 
-    /// Straightforward per-site reference for the fast kernel + ambiguity fallback.
+    /// Straightforward per-site reference for the fast kernel + ambiguity passes.
     fn reference_counts(a: &str, b: &str, mode: Ambiguity) -> CountsWithGc {
         let mut c = CountsWithGc::default();
         for (&x, &y) in a.as_bytes().iter().zip(b.as_bytes()) {
-            let (cx, cy) = (IUPAC[x as usize], IUPAC[y as usize]);
-            let informative = |code: u8| code != 0 && code != 15;
-            if !informative(cx) || !informative(cy) { continue; }
+            let (mut cx, mut cy) = (IUPAC[x as usize], IUPAC[y as usize]);
+            let n_as = |code: u8| if code == 15 && !mode.compares_n() { 0 } else { code };
+            (cx, cy) = (n_as(cx), n_as(cy));
+            if mode.gap_is_n() && (cx | cy) != 0 {
+                let gap_as_n = |code: u8| if code == 0 { 15 } else { code };
+                (cx, cy) = (gap_as_n(cx), gap_as_n(cy));
+            }
+            if cx == 0 || cy == 0 { continue; }
             let single = |code: u8| code.count_ones() == 1;
             if single(cx) && single(cy) {
                 c.add(cx.trailing_zeros() as usize, cy.trailing_zeros() as usize, 1.0);
@@ -628,8 +784,8 @@ mod tests {
 
     #[test]
     fn ambiguity_fallback_matches_per_site_reference() {
-        for mode in [Ambiguity::Resolve, Ambiguity::Average] {
-            for (a, b) in random_pairs(23, 300, b"ACGTN-RYKMSWBDHVacgtry") {
+        for mode in [Ambiguity::Resolve, Ambiguity::Average, Ambiguity::GapMm] {
+            for (a, b) in random_pairs(23, 300, b"ACGTN-RYKMSWBDHVacgtry?.n") {
                 let got = set_counts_with_gc(&a, &b, mode);
                 let want = reference_counts(&a, &b, mode);
                 assert!(close(&got, &want), "{mode:?}\n{a}\n{b}\n{got:?}\n{want:?}");
