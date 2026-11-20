@@ -70,6 +70,15 @@ check('ambiguity modes', () => {
   assert.equal(average.distance('transitions', 0, 2), 0.5);
   resolve.free();
   average.free();
+
+  // GapMM: a gap facing a base is an N (3/4 mismatch, 3 such sites); gap facing gap is skipped
+  const gapmm = new bx.SequenceSet(['ACGT-', 'AC--A', 'ACGT-'], 'gapmm');
+  assert.equal(gapmm.ambiguous_count(), 3);
+  assert.equal(gapmm.distance('snps', 0, 1), 2.25);
+  assert.equal(gapmm.distance('hamming', 0, 1), 2.25 / 5);
+  assert.equal(gapmm.distance('snps', 0, 2), 0);
+  assert.ok(gapmm.distance('tn93', 0, 1) > 0);
+  gapmm.free();
 });
 
 check('errors are thrown as JS errors', () => {

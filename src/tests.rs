@@ -584,11 +584,61 @@ mod tests {
     }
 
     #[test]
-    fn n_and_gaps_are_never_compared() {
+    fn n_and_gaps_are_not_compared_outside_gapmm() {
         for mode in [Ambiguity::Skip, Ambiguity::Resolve, Ambiguity::Average] {
             let c = set_counts("ANR-T", "ARNRT", mode);
             assert_eq!(c.sites, 2.0, "{mode:?}");
         }
+    }
+
+    #[test]
+    fn gapmm_compares_a_gap_facing_a_base_as_n() {
+        // N vs A: a quarter each of A-A, C-A, G-A, T-A
+        let c = set_counts_with_gc("-", "A", Ambiguity::GapMm);
+        assert_eq!((c.counts.sites, c.counts.ts_purine, c.counts.transversions), (1.0, 0.25, 0.5));
+        assert_eq!((c.counts.freq, c.gc1), ([1.25, 0.25, 0.25, 0.25], 0.5));
+        // Either side; '.', 'X' and other non-nucleotides are gaps too
+        for (a, b) in [("A", "-"), ("A", "."), ("A", "X"), ("a", "*")] {
+            let c = set_counts_with_gc(a, b, Ambiguity::GapMm);
+            assert_eq!((c.counts.sites, c.counts.freq, c.gc1), (1.0, [1.25, 0.25, 0.25, 0.25], 0.0), "{a} {b}");
+        }
+        // Gap vs gap is skipped
+        assert_eq!(set_counts("-.X", "-.-", Ambiguity::GapMm).sites, 0.0);
+    }
+
+    #[test]
+    fn gapmm_compares_n_and_question_mark_as_any_base() {
+        // N vs N, ? vs gap: 1/16 of every pair of bases
+        for (a, b) in [("N", "N"), ("?", "-"), ("-", "n")] {
+            let c = set_counts_with_gc(a, b, Ambiguity::GapMm);
+            assert_eq!((c.counts.sites, c.counts.ts_purine, c.counts.ts_pyrimidine), (1.0, 0.125, 0.125), "{a} {b}");
+            assert_eq!((c.counts.transversions, c.counts.freq, c.gc1), (0.5, [0.5; 4], 0.5), "{a} {b}");
+        }
+        // R vs gap is R vs N: 1/8 of each of A or G against each base
+        let c = set_counts("R", "-", Ambiguity::GapMm);
+        assert_eq!((c.sites, c.ts_purine, c.transversions, c.freq), (1.0, 0.25, 0.5, [0.75, 0.25, 0.75, 0.25]));
+        // Everything else averages, as in average mode
+        assert_eq!(set_counts("RYB", "AAA", Ambiguity::GapMm), set_counts("RYB", "AAA", Ambiguity::Average));
+    }
+
+    #[test]
+    fn gapmm_serves_every_metric() {
+        // 4 sites: 2 matches, A vs gap (3/4 mismatch), G vs N (3/4 mismatch)
+        let set = SequenceSet::from_strs(&["ACAG", "AC-N"], Ambiguity::GapMm);
+        assert_eq!(set.pair(Metric::Snps, 0, 1), 1.5);
+        assert_eq!(set.pair(Metric::Hamming, 0, 1), 1.5 / 4.0);
+        assert_eq!(set.pair(Metric::PDistance, 0, 1), 1.5 / 4.0);
+        assert_eq!(set.pair(Metric::Transitions, 0, 1), 0.5);
+        assert_eq!(set.pair(Metric::Transversions, 0, 1), 1.0);
+        assert_eq!(set.pair(Metric::TsTvRatio, 0, 1), 0.5);
+        let c = set.tally::<CountsWithGc>(0, 1, f64::INFINITY).unwrap();
+        for metric in [Metric::Jc69, Metric::K2p, Metric::Tn92, Metric::Tn93] {
+            let want = metric.eval_with_gc(&c);
+            assert!(want.is_finite() && want > 0.0, "{metric:?}: {want}");
+            assert_eq!(set.pair(metric, 0, 1).to_bits(), want.to_bits(), "{metric:?}");
+        }
+        // Ambiguity::parse accepts the name in any case
+        assert_eq!(Ambiguity::parse("GapMM"), Some(Ambiguity::GapMm));
     }
 
     #[test]
@@ -601,13 +651,18 @@ mod tests {
         }
     }
 
-    /// Straightforward per-site reference for the fast kernel + ambiguity fallback.
+    /// Straightforward per-site reference for the fast kernel + ambiguity passes.
     fn reference_counts(a: &str, b: &str, mode: Ambiguity) -> CountsWithGc {
         let mut c = CountsWithGc::default();
         for (&x, &y) in a.as_bytes().iter().zip(b.as_bytes()) {
-            let (cx, cy) = (IUPAC[x as usize], IUPAC[y as usize]);
-            let informative = |code: u8| code != 0 && code != 15;
-            if !informative(cx) || !informative(cy) { continue; }
+            let (mut cx, mut cy) = (IUPAC[x as usize], IUPAC[y as usize]);
+            let n_as = |code: u8| if code == 15 && !mode.compares_n() { 0 } else { code };
+            (cx, cy) = (n_as(cx), n_as(cy));
+            if mode.gap_is_n() && (cx | cy) != 0 {
+                let gap_as_n = |code: u8| if code == 0 { 15 } else { code };
+                (cx, cy) = (gap_as_n(cx), gap_as_n(cy));
+            }
+            if cx == 0 || cy == 0 { continue; }
             let single = |code: u8| code.count_ones() == 1;
             if single(cx) && single(cy) {
                 c.add(cx.trailing_zeros() as usize, cy.trailing_zeros() as usize, 1.0);
@@ -628,8 +683,8 @@ mod tests {
 
     #[test]
     fn ambiguity_fallback_matches_per_site_reference() {
-        for mode in [Ambiguity::Resolve, Ambiguity::Average] {
-            for (a, b) in random_pairs(23, 300, b"ACGTN-RYKMSWBDHVacgtry") {
+        for mode in [Ambiguity::Resolve, Ambiguity::Average, Ambiguity::GapMm] {
+            for (a, b) in random_pairs(23, 300, b"ACGTN-RYKMSWBDHVacgtry?.n") {
                 let got = set_counts_with_gc(&a, &b, mode);
                 let want = reference_counts(&a, &b, mode);
                 assert!(close(&got, &want), "{mode:?}\n{a}\n{b}\n{got:?}\n{want:?}");

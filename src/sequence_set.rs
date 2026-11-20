@@ -56,20 +56,21 @@ impl Links {
 #[wasm_bindgen]
 impl SequenceSet {
     /// Encodes `seqs` once. `ambiguity` decides how sites holding IUPAC ambiguity codes
-    /// (R, Y, S, W, K, M, B, D, H, V) are compared:
+    /// (R, Y, S, W, K, M, B, D, H, V) are compared, as HIV-TRACE's `tn93 -a` does:
     /// - `"skip"` (default): ignore them. Every pair uses the fast bit-plane kernel.
     /// - `"resolve"`: count a site as a match if the two codes share a base, otherwise average.
     /// - `"average"`: average over every pair of bases the two codes allow.
+    /// - `"gapmm"`: as `"average"`, and compare a gap facing anything but a gap as an `N`
+    ///   (any base, averaged). `N` and `?` are compared as fourfold ambiguity codes.
     ///
-    /// With `"resolve"` or `"average"`, only pairs involving a sequence that actually contains
-    /// ambiguity codes pay for the slower fallback. `N`, gaps and other characters are always
-    /// skipped.
+    /// Otherwise `N`, gaps and other characters are skipped. Only pairs involving a sequence
+    /// that actually holds a compared ambiguity code pay for the extra passes.
     #[wasm_bindgen(constructor)]
     pub fn new(seqs: Vec<String>, ambiguity: Option<String>) -> Result<SequenceSet, JsError> {
         let mode = match ambiguity.as_deref() {
             None => Ambiguity::Skip,
             Some(name) => Ambiguity::parse(name).ok_or_else(|| {
-                JsError::new(&format!("unknown ambiguity mode '{name}' (expected skip, resolve or average)"))
+                JsError::new(&format!("unknown ambiguity mode '{name}' (expected skip, resolve, average or gapmm)"))
             })?,
         };
         Ok(SequenceSet::from_strs(&seqs, mode))
@@ -81,10 +82,10 @@ impl SequenceSet {
         self.seqs.len() as u32
     }
 
-    /// Number of sequences that contain ambiguity codes and use the fallback kernel
-    /// (always 0 in `"skip"` mode).
+    /// Number of sequences that hold an ambiguity code the mode compares, so that their pairs
+    /// take the extra passes (always 0 in `"skip"` mode; gaps count in `"gapmm"` mode).
     pub fn ambiguous_count(&self) -> u32 {
-        self.seqs.iter().filter(|s| s.ambiguity.is_some()).count() as u32
+        self.seqs.iter().filter(|s| s.has_ambiguity()).count() as u32
     }
 
     /// Distance between sequences `i` and `j`.
@@ -126,9 +127,8 @@ impl SequenceSet {
 
 impl SequenceSet {
     pub(crate) fn from_strs<S: AsRef<str>>(seqs: &[S], mode: Ambiguity) -> SequenceSet {
-        let resolutions = (mode != Ambiguity::Skip).then(|| Resolutions::new(mode));
-        let track = resolutions.is_some();
-        let seqs = seqs.iter().map(|s| Encoded::new(s.as_ref().as_bytes(), track)).collect();
+        let resolutions = mode.tracks_ambiguity().then(|| Resolutions::new(mode));
+        let seqs = seqs.iter().map(|s| Encoded::new(s.as_ref().as_bytes(), mode)).collect();
         SequenceSet { seqs, resolutions }
     }
 
@@ -191,10 +191,30 @@ impl SequenceSet {
     }
 
     /// Row `i` of the triangle for each metric, metric-major: `row[m * width + (j - i - 1)]`.
+    ///
+    /// Without ambiguity resolution the loop calls the bit-plane kernel alone: the cheapest scans
+    /// take ~30 ns per pair, and even an untaken per-pair branch to the ambiguity passes in the
+    /// loop cost them ~10%.
     fn fill_row<T: Tally>(&self, i: usize, metrics: &[Metric], row: &mut [f64], eval: impl Fn(Metric, &T) -> f64) {
+        let x = &self.seqs[i];
+        match &self.resolutions {
+            None => self.fill_row_with(i, metrics, row, eval, |y| T::count_planes(&x.words, &y.words, f64::INFINITY)),
+            Some(table) => self.fill_row_with(i, metrics, row, eval, |y| count_pair(x, y, Some(table), f64::INFINITY)),
+        }
+    }
+
+    #[inline(always)]
+    fn fill_row_with<T>(
+        &self,
+        i: usize,
+        metrics: &[Metric],
+        row: &mut [f64],
+        eval: impl Fn(Metric, &T) -> f64,
+        count: impl Fn(&Encoded) -> Option<T>,
+    ) {
         let width = self.len() - 1 - i;
-        for j in i + 1..self.len() {
-            let tally = self.tally::<T>(i, j, f64::INFINITY).expect(UNBOUNDED);
+        for (j, y) in self.seqs.iter().enumerate().skip(i + 1) {
+            let tally = count(y).expect(UNBOUNDED);
             for (m, &metric) in metrics.iter().enumerate() {
                 row[m * width + (j - i - 1)] = eval(metric, &tally);
             }

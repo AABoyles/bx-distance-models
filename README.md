@@ -163,8 +163,11 @@ or cross-origin isolation is needed.
 #### Ambiguity codes
 
 ```javascript
-const set = new SequenceSet(seqs, 'resolve'); // or 'average'; default 'skip'
+const set = new SequenceSet(seqs, 'resolve'); // or 'average', 'gapmm'; default 'skip'
 ```
+
+The modes are those of HIV-TRACE's `tn93 -a` ([veg/tn93](https://github.com/veg/tn93)), and
+TN93 distances agree with it to 1e-12 (see [Testing](#testing)):
 
 - `'skip'` (default): sites where either sequence holds a partial ambiguity code are not compared.
   Every pair uses the fast bit-plane kernel.
@@ -172,11 +175,17 @@ const set = new SequenceSet(seqs, 'resolve'); // or 'average'; default 'skip'
   is averaged.
 - `'average'`: each site contributes every pair of bases the two codes allow, weighted equally
   (`R` vs `A` is half a match and half an A↔G transition). Counts can be fractional.
+- `'gapmm'`: as `'average'`, and a gap facing anything other than a gap is compared as an `N`
+  (any base), so a gap facing `A` adds a quarter to each of A-A, A-C, A-G and A-T: three quarters
+  of a mismatch. Gap facing gap is skipped. `N` and `?` are fourfold ambiguity codes, and every
+  other character that is not a nucleotide (`.`, `X`, ...) is a gap. Every metric uses it, not
+  only TN93.
 
-With `'resolve'` or `'average'`, sequences without ambiguity codes still use the fast path; only
-pairs involving a sequence that contains them pay for the slower fallback, and only in proportion
-to the number of ambiguous sites. `set.ambiguous_count()` reports how many sequences use it.
-`N` is always skipped.
+Sequences without ambiguity codes still use the fast path; only pairs involving a sequence that
+contains them pay for the extra work. Partial codes are visited one by one, which costs in
+proportion to their number; sites compared as `N` (gaps in `'gapmm'`) are counted with popcounts
+over the 64-site words that hold any. `set.ambiguous_count()` reports how many sequences need
+either. Outside `'gapmm'`, `N` and `?` are skipped.
 
 #### Legacy batch functions
 
@@ -290,7 +299,7 @@ Ratio of transitions to transversions (useful for quality assessment).
 
 ### Batch Processing
 
-#### `new SequenceSet(seqs: string[], ambiguity?: 'skip' | 'resolve' | 'average')`
+#### `new SequenceSet(seqs: string[], ambiguity?: 'skip' | 'resolve' | 'average' | 'gapmm')`
 Encodes aligned sequences once. Throws on an unknown ambiguity mode.
 
 - `length: number`: number of sequences.
@@ -299,7 +308,8 @@ Encodes aligned sequences once. Throws on an unknown ambiguity mode.
   `[rowStart, rowEnd)` (default all), in pair order.
 - `links(metric, threshold, rowStart?, rowEnd?) -> Links`: pairs with distance `<= threshold`.
 - `row_splits(parts) -> Uint32Array`: `parts + 1` row boundaries with balanced pair counts.
-- `ambiguous_count() -> number`: sequences that use the ambiguity fallback.
+- `ambiguous_count() -> number`: sequences holding an ambiguity code the mode compares (gaps
+  count in `'gapmm'`), whose pairs need more than the fast kernel.
 - `free()`: releases WASM memory.
 
 Methods throw on an unknown metric or an invalid row range.
@@ -382,6 +392,11 @@ It includes:
   JC69, K2P (K80), T92 and TN93 on 208 generated pairs (`tests/reference/`). The table is
   produced by `Rscript tests/reference/generate.R` (needs the `ape` package); the script's header
   explains where ape's conventions differ from this library's;
+- reference values from HIV-TRACE's `tn93` (veg/tn93 v1.1.0) for TN93 in every ambiguity mode, on
+  MicrobeTrace's hand-checkable golden alignments, cases with `N` and `?`, and a seeded random
+  alignment with gaps, ambiguity codes and lowercase (`tests/reference/tn93/`). The table is
+  produced by `python3 tests/reference/tn93/generate.py`, which builds tn93 from source (needs
+  git, cmake and a C++ compiler; or set `TN93` to a binary built as the script describes);
 - property-based tests (`src/proptests.rs`, using `proptest`) that generate sets of related
   sequences with gaps, ambiguity codes, mixed case and unequal lengths, and check the kernels
   against a per-site reference, symmetry, self-distance, value ranges, row ranges and

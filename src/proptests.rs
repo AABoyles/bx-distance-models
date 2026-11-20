@@ -14,7 +14,7 @@ const ALL: [Metric; 10] = [
     Metric::Snps, Metric::Hamming, Metric::PDistance, Metric::Jc69, Metric::K2p,
     Metric::Tn92, Metric::Tn93, Metric::Transitions, Metric::Transversions, Metric::TsTvRatio,
 ];
-const MODES: [Ambiguity; 3] = [Ambiguity::Skip, Ambiguity::Resolve, Ambiguity::Average];
+const MODES: [Ambiguity; 4] = [Ambiguity::Skip, Ambiguity::Resolve, Ambiguity::Average, Ambiguity::GapMm];
 /// Characters substituted into sequences: bases in either case, U, gaps, N, every partial
 /// ambiguity code and characters that are not nucleotides at all.
 const NOISE: &[u8] = b"ACGTacgtUu--NnRYSWKMBDHVrykm?.*X";
@@ -51,11 +51,21 @@ fn sequence_set() -> impl Strategy<Value = Vec<String>> {
 }
 
 /// Per-site reference: one IUPAC lookup per site, no bit planes, no sparse ambiguity lists.
+/// Follows tn93's `computeTN93`: N is an ambiguity code where the mode compares it, and in GapMM
+/// mode a gap facing anything but a gap is an N.
 fn reference_counts(a: &str, b: &str, mode: Ambiguity) -> CountsWithGc {
     let mut c = CountsWithGc::default();
     for (&x, &y) in a.as_bytes().iter().zip(b.as_bytes()) {
-        let (cx, cy) = (IUPAC[x as usize], IUPAC[y as usize]);
-        if cx == 0 || cy == 0 || cx == 15 || cy == 15 {
+        let (mut cx, mut cy) = (IUPAC[x as usize], IUPAC[y as usize]);
+        if !mode.compares_n() {
+            cx = if cx == 15 { 0 } else { cx };
+            cy = if cy == 15 { 0 } else { cy };
+        }
+        if mode.gap_is_n() && (cx != 0 || cy != 0) {
+            cx = if cx == 0 { 15 } else { cx };
+            cy = if cy == 0 { 15 } else { cy };
+        }
+        if cx == 0 || cy == 0 {
             continue;
         }
         if cx.count_ones() == 1 && cy.count_ones() == 1 {
