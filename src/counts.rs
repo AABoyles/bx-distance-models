@@ -269,7 +269,8 @@ impl FullSites {
             s1[2] += (m1 & hi1).count_ones();
             s1[3] += (m1 & lo1 & hi1).count_ones();
         }
-        let by_base = |[n, lo, hi, t]: [u32; 4]| [n - lo - hi + t, lo - t, hi - t, t];
+        // A = n - (C + G + T) = n - (lo + hi - t); add t first so no step goes below zero.
+        let by_base = |[n, lo, hi, t]: [u32; 4]| [n + t - lo - hi, lo - t, hi - t, t];
         FullSites { base1: by_base(s1), base2: by_base(s2), both }
     }
 
