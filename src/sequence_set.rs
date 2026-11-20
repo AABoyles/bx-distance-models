@@ -18,6 +18,8 @@ pub struct SequenceSet {
     seqs: Vec<Encoded>,
     /// How ambiguity codes are compared; `None` in "skip" mode.
     comparison: Option<Comparison>,
+    /// `"tn93"` means [`Metric::Tn93K2p`].
+    tn93_k2p_fallback: bool,
 }
 
 /// The `options` object of `new SequenceSet(seqs, ambiguity, options)`.
@@ -25,9 +27,11 @@ pub struct SequenceSet {
 pub(crate) struct SetOptions {
     /// `maxAmbiguityFraction`: tn93's `-g`, with `"resolve"` only.
     pub max_ambiguity_fraction: Option<f64>,
+    /// `tn93K2pFallback`: TN93 falls back to K2P when a base never occurs in a pair, as tn93 does.
+    pub tn93_k2p_fallback: bool,
 }
 
-const OPTION_NAMES: &str = "maxAmbiguityFraction";
+const OPTION_NAMES: &str = "maxAmbiguityFraction, tn93K2pFallback";
 
 #[wasm_bindgen(typescript_custom_section)]
 const TS_TYPES: &str = r#"
@@ -41,6 +45,11 @@ export interface SequenceSetOptions {
    * resolved sites are at least this fraction of its compared sites is averaged instead.
    */
   maxAmbiguityFraction?: number;
+  /**
+   * 'tn93' falls back to K2P when a base never occurs in a pair, as HIV-TRACE's tn93 does
+   * (default: the TN93 terms that vanish drop out). Saturation still gives Infinity.
+   */
+  tn93K2pFallback?: boolean;
 }
 "#;
 
@@ -57,6 +66,10 @@ impl SetOptions {
                 "maxAmbiguityFraction" => {
                     parsed.max_ambiguity_fraction =
                         Some(value.as_f64().ok_or("maxAmbiguityFraction must be a number")?);
+                }
+                "tn93K2pFallback" if value.is_undefined() || value.is_null() => {}
+                "tn93K2pFallback" => {
+                    parsed.tn93_k2p_fallback = value.as_bool().ok_or("tn93K2pFallback must be a boolean")?;
                 }
                 _ => return Err(format!("unknown option '{name}' (expected: {OPTION_NAMES})")),
             }
@@ -130,6 +143,8 @@ impl SequenceSet {
     ///   least this fraction of its compared sites; then it is averaged instead. As in tn93, a
     ///   resolved site is a base facing a code that contains it, or two ambiguity codes (N
     ///   included) whether or not they share a base. 1 never averages; 0 always does.
+    /// - `tn93K2pFallback` (boolean): `"tn93"` uses the K2P formula for a pair in which a base
+    ///   never occurs, as tn93 does. By default the TN93 terms that vanish drop out instead.
     #[wasm_bindgen(constructor)]
     // The parameters keep their generated types (`string`, `object`), which leaves them optional
     // in TypeScript; `unchecked_param_type` would make them required. The types above document
@@ -159,7 +174,7 @@ impl SequenceSet {
 
     /// Distance between sequences `i` and `j`.
     pub fn distance(&self, metric: &str, i: u32, j: u32) -> Result<f64, JsError> {
-        let metric = parse_metric(metric).map_err(|e| JsError::new(&e))?;
+        let metric = self.metric(metric).map_err(|e| JsError::new(&e))?;
         let n = self.len();
         if i as usize >= n || j as usize >= n {
             return Err(JsError::new(&format!("index out of range for {n} sequences")));
@@ -171,7 +186,7 @@ impl SequenceSet {
     /// in pair order. Concatenating the results for consecutive row ranges gives the full
     /// triangle; `get_distance_index(i, j, n)` maps a pair to its position in it.
     pub fn distances(&self, metric: &str, row_start: Option<u32>, row_end: Option<u32>) -> Result<Float64Array, JsError> {
-        let metric = parse_metric(metric).map_err(|e| JsError::new(&e))?;
+        let metric = self.metric(metric).map_err(|e| JsError::new(&e))?;
         let rows = self.row_range(row_start, row_end).map_err(|e| JsError::new(&e))?;
         self.dense_js(&[metric], rows).map_err(|e| JsError::new(&e))
     }
@@ -182,7 +197,7 @@ impl SequenceSet {
     /// as soon as it can no longer pass, which makes sparse output much faster than
     /// `distances()` when most pairs are far apart.
     pub fn links(&self, metric: &str, threshold: f64, row_start: Option<u32>, row_end: Option<u32>) -> Result<Links, JsError> {
-        let metric = parse_metric(metric).map_err(|e| JsError::new(&e))?;
+        let metric = self.metric(metric).map_err(|e| JsError::new(&e))?;
         let rows = self.row_range(row_start, row_end).map_err(|e| JsError::new(&e))?;
         Ok(self.sparse(metric, threshold, rows))
     }
@@ -203,7 +218,13 @@ impl SequenceSet {
         options.validate(mode)?;
         let comparison = mode.tracks_ambiguity().then(|| Comparison::new(mode, options.max_ambiguity_fraction));
         let seqs = seqs.iter().map(|s| Encoded::new(s.as_ref().as_bytes(), mode)).collect();
-        Ok(SequenceSet { seqs, comparison })
+        Ok(SequenceSet { seqs, comparison, tn93_k2p_fallback: options.tn93_k2p_fallback })
+    }
+
+    /// `name` as a metric of this set (the options can change what `"tn93"` means).
+    pub(crate) fn metric(&self, name: &str) -> Result<Metric, String> {
+        let metric = parse_metric(name)?;
+        Ok(if metric == Metric::Tn93 && self.tn93_k2p_fallback { Metric::Tn93K2p } else { metric })
     }
 
     pub(crate) fn len(&self) -> usize {

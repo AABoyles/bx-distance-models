@@ -25,6 +25,9 @@ ambiguity modes mean.
   site is a base facing a code that contains it, or two ambiguity codes (N included) whether or
   not they share a base. One scan per pair, and `links()` keeps its exact early exit:
   `new SequenceSet(seqs, 'resolve', { maxAmbiguityFraction: 0.015 })`. Unknown options throw.
+- `SequenceSet` option `tn93K2pFallback`: `'tn93'` uses the K2P formula for a pair in which one
+  of A, C, G, T never occurs, as tn93 does. The default is unchanged (the TN93 terms that vanish
+  drop out); saturation is still `Infinity` (tn93: 1000) and no compared site still `NaN`.
 - TypeScript types `AmbiguityMode` and `SequenceSetOptions`.
 - `SequenceSet` ambiguity mode `'gapmm'` (`tn93 -a gapmm`): as `'average'`, and a gap facing
   anything other than a gap is compared as an `N`, so a gap facing a base adds a quarter to each of

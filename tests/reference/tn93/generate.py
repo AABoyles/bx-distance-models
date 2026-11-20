@@ -24,6 +24,8 @@ The files:
 - distances.fasta, ambiguity.fasta, hivtrace-g.fasta: MicrobeTrace's hand-checkable golden data
   (MicrobeTrace test/golden/README.md describes every sequence).
 - n_codes.fasta: N and ? facing bases, partial codes, N and gaps.
+- missing_base.fasta: pairs where a base never occurs, for which tn93 uses K2P instead of TN93
+  (the library's tn93K2pFallback option), including one that saturates.
 - random.fasta: written by this script from a fixed seed: clusters of related sequences with
   ragged ends, gap runs (some longer than 17, which take tn93's gap-jump path), N, ?, partial
   ambiguity codes at varying rates, and lowercase.
@@ -42,7 +44,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "..", "tn93_distances.tsv")
 COMMIT = "076eb0f"
-FILES = ["distances.fasta", "ambiguity.fasta", "hivtrace-g.fasta", "n_codes.fasta", "random.fasta"]
+FILES = ["distances.fasta", "ambiguity.fasta", "hivtrace-g.fasta", "n_codes.fasta", "missing_base.fasta", "random.fasta"]
 # (mode, -g fraction or None)
 CONFIGS = [("skip", None), ("resolve", None), ("average", None), ("gapmm", None)] + [
     ("resolve", f) for f in (0.015, 0.05, 0.0, 1.0)

@@ -34,6 +34,9 @@ pub enum Metric {
     K2p,
     Tn92,
     Tn93,
+    /// TN93, or K2P when a base never occurs in the pair, as tn93 computes it. Not a metric name:
+    /// `SequenceSet`'s `tn93K2pFallback` option turns `"tn93"` into it.
+    Tn93K2p,
     Transitions,
     Transversions,
     TsTvRatio,
@@ -79,6 +82,7 @@ impl Metric {
             Metric::K2p => evolutionary::k2p(c),
             Metric::Tn92 => unreachable!("T92 needs per-sequence G+C content: use eval_with_gc"),
             Metric::Tn93 => evolutionary::tn93(c),
+            Metric::Tn93K2p => evolutionary::tn93_or_k2p(c),
             Metric::Transitions => diagnostics::transitions(c),
             Metric::Transversions => diagnostics::transversions(c),
             Metric::TsTvRatio => diagnostics::ts_tv(c),
@@ -107,8 +111,8 @@ impl Metric {
 
     /// Mismatch count above which a pair can no longer score `<= threshold`, given that it can
     /// compare at most `max_sites` sites. Used to stop scanning a pair early; exact, not a
-    /// heuristic: the SNP count is the mismatch count, and Hamming, JC69, K2P, T92 and TN93 are
-    /// never smaller than the p-distance (mismatches / sites; applying -ln(1 - x) >= x to each log
+    /// heuristic: the SNP count is the mismatch count, and Hamming, JC69, K2P, T92 and TN93 (with
+    /// or without the K2P fallback) are never smaller than the p-distance (mismatches / sites; applying -ln(1 - x) >= x to each log
     /// term of the corrected models gives exactly p). Other metrics are never pruned.
     pub fn mismatch_bound(self, threshold: f64, max_sites: u32) -> f64 {
         match self {
@@ -118,7 +122,8 @@ impl Metric {
             | Metric::Jc69
             | Metric::K2p
             | Metric::Tn92
-            | Metric::Tn93 => threshold * max_sites as f64,
+            | Metric::Tn93
+            | Metric::Tn93K2p => threshold * max_sites as f64,
             _ => f64::INFINITY,
         }
     }

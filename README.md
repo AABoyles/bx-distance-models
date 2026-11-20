@@ -36,6 +36,14 @@ When two sequences share no comparable sites at all (for example, they only over
 every distance is `NaN`: it is undefined, not maximal. `links()` never includes such a pair, and
 the SNP count is 0.
 
+**TN93 when a base is missing.** If one of A, C, G, T never occurs in a pair's compared sites,
+some TN93 terms are 0/0 (no substitution of that kind is possible either). This library drops
+those terms, their limit. HIV-TRACE's tn93 uses the K2P formula for such a pair instead (and
+reports 1000 when that saturates). Both are defensible; they give different values. To match tn93,
+create the set with `{ tn93K2pFallback: true }` (see [SequenceSet](#batch-processing)); `'tn93'`
+then uses K2P for those pairs, still `Infinity` on saturation and `NaN` with nothing to compare.
+Pairs with all four bases are unaffected.
+
 ### Diagnostics
 - **Transitions Count**: Purine-to-purine (A↔G) and pyrimidine-to-pyrimidine (C↔T) changes
 - **Transversions Count**: Purine-to-pyrimidine and pyrimidine-to-purine changes
@@ -298,7 +306,8 @@ These return substitutions per site (not capped at 1), or `Infinity` when the mo
 
 #### `tn93_distance(seq1: string, seq2: string) -> number`
 Tamura-Nei 93 distance (separate rates for A↔G, C↔T and transversions; base frequencies from the
-two sequences).
+two sequences). Without the K2P fallback when a base is missing (`SequenceSet` has it as an
+option).
 
 #### `jc69_distance(seq1: string, seq2: string) -> number`
 Jukes-Cantor 69 distance (simple model, assumes equal substitution rates). `Infinity` when p ≥ 3/4.
@@ -329,6 +338,9 @@ invalid one. Options:
 
 - `maxAmbiguityFraction?: number` (`'resolve'` only, 0 to 1): HIV-TRACE's `-g`; see
   [Ambiguity codes](#ambiguity-codes).
+- `tn93K2pFallback?: boolean`: `'tn93'` uses K2P for a pair in which a base never occurs, as
+  HIV-TRACE's tn93 does (default: the TN93 terms that vanish drop out). See
+  [Evolutionary Models](#evolutionary-models).
 
 The `.d.ts` exports `AmbiguityMode` and `SequenceSetOptions` for these arguments.
 

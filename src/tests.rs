@@ -330,6 +330,7 @@ mod tests {
             Metric::Transitions => legacy::transitions(a, b),
             Metric::Transversions => legacy::transversions(a, b),
             Metric::TsTvRatio => legacy::ts_tv(a, b),
+            Metric::Tn93K2p => unreachable!("the old implementation had no K2P fallback"),
         }
     }
 
@@ -662,7 +663,7 @@ mod tests {
     }
 
     fn max_fraction(seqs: &[&str], fraction: f64) -> SequenceSet {
-        let options = SetOptions { max_ambiguity_fraction: Some(fraction) };
+        let options = SetOptions { max_ambiguity_fraction: Some(fraction), ..SetOptions::default() };
         SequenceSet::with_options(seqs, Ambiguity::Resolve, options).unwrap()
     }
 
@@ -705,7 +706,7 @@ mod tests {
 
     #[test]
     fn max_ambiguity_fraction_is_validated() {
-        let with = |mode, f| SequenceSet::with_options(&["ACGT"], mode, SetOptions { max_ambiguity_fraction: Some(f) });
+        let with = |mode, f| SequenceSet::with_options(&["ACGT"], mode, SetOptions { max_ambiguity_fraction: Some(f), ..SetOptions::default() });
         assert!(with(Ambiguity::Resolve, 0.015).is_ok());
         for mode in [Ambiguity::Skip, Ambiguity::Average, Ambiguity::GapMm] {
             let err = with(mode, 0.015).err().unwrap();
@@ -714,6 +715,31 @@ mod tests {
         for f in [-0.1, 1.5, f64::NAN] {
             assert!(with(Ambiguity::Resolve, f).err().unwrap().contains("between 0 and 1"), "{f}");
         }
+    }
+
+    #[test]
+    fn tn93_k2p_fallback_uses_k2p_only_when_a_base_never_occurs() {
+        use metrics::evolutionary::{k2p, tn93};
+        // 0-1: only A and T (K2P); 2-3: all four bases (TN93); 4: nothing comparable with 0
+        let seqs = ["ATTAATATTA", "ATTAATTTTA", "ACGTACGTAC", "ACGTACGTAA", "----------"];
+        let options = SetOptions { tn93_k2p_fallback: true, ..SetOptions::default() };
+        let set = SequenceSet::with_options(&seqs, Ambiguity::Skip, options).unwrap();
+        assert_eq!(set.metric("tn93"), Ok(Metric::Tn93K2p));
+        assert_eq!(set.metric("k2p"), Ok(Metric::K2p));
+        assert_eq!(SequenceSet::from_strs(&seqs, Ambiguity::Skip).metric("TN93"), Ok(Metric::Tn93));
+
+        let c = set.tally::<Counts>(0, 1, f64::INFINITY).unwrap();
+        assert_eq!(c.freq[1], 0.0);
+        let (fallback, dropped) = (set.pair(Metric::Tn93K2p, 0, 1), set.pair(Metric::Tn93, 0, 1));
+        assert_eq!(fallback.to_bits(), k2p(&c).to_bits());
+        assert_eq!(dropped.to_bits(), tn93(&c).to_bits());
+        assert!(fallback.is_finite() && dropped.is_finite() && fallback != dropped);
+
+        assert_eq!(set.pair(Metric::Tn93K2p, 2, 3).to_bits(), set.pair(Metric::Tn93, 2, 3).to_bits());
+        assert!(set.pair(Metric::Tn93K2p, 0, 4).is_nan());
+        // Saturated K2P (every site a transversion) is Infinity, as without the option
+        let set = SequenceSet::with_options(&["AAAA", "TTTT"], Ambiguity::Skip, options).unwrap();
+        assert_eq!(set.pair(Metric::Tn93K2p, 0, 1), f64::INFINITY);
     }
 
     #[test]

@@ -104,6 +104,14 @@ check('ambiguity modes', () => {
   assert.equal(high.links('snps', 0).length, 1);
   [low, high].forEach(s => s.free());
   new bx.SequenceSet(gSeqs, 'resolve', {}).free();
+
+  // tn93K2pFallback: a pair with only A and T uses K2P, as tn93 does
+  const atSeqs = ['ATTAATATTA', 'ATTAATTTTA'];
+  const [plain, k2pFallback] = [new bx.SequenceSet(atSeqs), new bx.SequenceSet(atSeqs, 'skip', { tn93K2pFallback: true })];
+  assert.equal(k2pFallback.distance('tn93', 0, 1), plain.distance('k2p', 0, 1));
+  assert.notEqual(plain.distance('tn93', 0, 1), plain.distance('k2p', 0, 1));
+  assert.deepEqual(Array.from(k2pFallback.links('tn93', 10).distance), [plain.distance('k2p', 0, 1)]);
+  [plain, k2pFallback].forEach(s => s.free());
   new bx.SequenceSet(gSeqs, 'resolve', { maxAmbiguityFraction: undefined }).free();
 });
 
@@ -113,6 +121,7 @@ check('errors are thrown as JS errors', () => {
   assert.throws(() => new bx.SequenceSet(seqs, 'average', { maxAmbiguityFraction: 0.1 }), /needs ambiguity mode 'resolve'/);
   assert.throws(() => new bx.SequenceSet(seqs, 'resolve', { maxAmbiguityFraction: 2 }), /between 0 and 1/);
   assert.throws(() => new bx.SequenceSet(seqs, 'resolve', { maxAmbiguityFraction: '0.1' }), /must be a number/);
+  assert.throws(() => new bx.SequenceSet(seqs, 'skip', { tn93K2pFallback: 1 }), /must be a boolean/);
   assert.throws(() => set.distances('bogus'), /unknown metric/);
   assert.throws(() => set.distances('tn93', 3, 2), /invalid row range/);
   assert.throws(() => set.distance('tn93', 0, n), /out of range/);

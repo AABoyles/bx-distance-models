@@ -10,9 +10,9 @@ use crate::encoding::{Ambiguity, IUPAC};
 use crate::metrics::{self, Metric};
 use crate::sequence_set::{row_splits, Links, SequenceSet, SetOptions};
 
-const ALL: [Metric; 10] = [
+const ALL: [Metric; 11] = [
     Metric::Snps, Metric::Hamming, Metric::PDistance, Metric::Jc69, Metric::K2p,
-    Metric::Tn92, Metric::Tn93, Metric::Transitions, Metric::Transversions, Metric::TsTvRatio,
+    Metric::Tn92, Metric::Tn93, Metric::Tn93K2p, Metric::Transitions, Metric::Transversions, Metric::TsTvRatio,
 ];
 const MODES: [Ambiguity; 4] = [Ambiguity::Skip, Ambiguity::Resolve, Ambiguity::Average, Ambiguity::GapMm];
 /// Characters substituted into sequences: bases in either case, U, gaps, N, every partial
@@ -125,6 +125,7 @@ fn single_pair(metric: Metric, a: &str, b: &str) -> f64 {
         Metric::K2p => k2p_distance(a, b),
         Metric::Tn92 => tn92_distance(a, b),
         Metric::Tn93 => tn93_distance(a, b),
+        Metric::Tn93K2p => tn93_or_k2p(&Counts::from_strs(a, b)),
         Metric::Transitions => transitions_count(a, b),
         Metric::Transversions => transversions_count(a, b),
         Metric::TsTvRatio => ts_tv_ratio(a, b),
@@ -132,7 +133,7 @@ fn single_pair(metric: Metric, a: &str, b: &str) -> f64 {
 }
 
 fn is_distance(metric: Metric) -> bool {
-    matches!(metric, Metric::Hamming | Metric::PDistance | Metric::Jc69 | Metric::K2p | Metric::Tn92 | Metric::Tn93)
+    matches!(metric, Metric::Hamming | Metric::PDistance | Metric::Jc69 | Metric::K2p | Metric::Tn92 | Metric::Tn93 | Metric::Tn93K2p)
 }
 
 proptest! {
@@ -298,7 +299,7 @@ proptest! {
         start in any::<prop::sample::Index>(),
     ) {
         let n = seqs.len();
-        let options = SetOptions { max_ambiguity_fraction: fraction };
+        let options = SetOptions { max_ambiguity_fraction: fraction, ..SetOptions::default() };
         let set = SequenceSet::with_options(&seqs, mode, options).unwrap();
         let rows = start.index(n + 1)..n;
         let dense = set.dense(&[metric], rows.clone());
@@ -324,7 +325,7 @@ proptest! {
         seqs in sequence_set(),
         fraction in prop_oneof![Just(0.0), Just(0.015), 0.0..0.2f64, Just(1.0)],
     ) {
-        let options = SetOptions { max_ambiguity_fraction: Some(fraction) };
+        let options = SetOptions { max_ambiguity_fraction: Some(fraction), ..SetOptions::default() };
         let set = SequenceSet::with_options(&seqs, Ambiguity::Resolve, options).unwrap();
         for i in 0..seqs.len() {
             for j in 0..seqs.len() {

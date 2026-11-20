@@ -93,7 +93,9 @@ bx-distance-models/
   Hamming/p-distance and JC69, `&CountsWithGc` for T92) and a `#[wasm_bindgen]` string wrapper
   (`name_distance(seq1, seq2)` etc.) that calls it via the matching `from_strs`
 - `basic.rs`: SNPs (count), Hamming / p-distance (identical, proportion [0, 1])
-- `evolutionary.rs`: TN93, JC69, K2P, T92 (Tamura 1992, exposed as `tn92`). Uncapped
+- `evolutionary.rs`: TN93, JC69, K2P, T92 (Tamura 1992, exposed as `tn92`); `tn93_or_k2p` is TN93
+  with tn93's K2P fallback when a base frequency is 0 (`Metric::Tn93K2p`, which has no name of its
+  own: the `tn93K2pFallback` set option maps `"tn93"` to it in `SequenceSet::metric`). Uncapped
   substitutions per site; `f64::INFINITY` when a log argument would be non-positive, or is within
   rounding of zero (`<= SATURATION`, 1e-12: exact boundary pairs otherwise gave ~19). Zero-weight
   terms of degenerate base compositions drop out (`ratio`/`weighted_ln`) instead of becoming NaN
@@ -135,8 +137,8 @@ bx-distance-models/
   single-pair functions skip `N`
 - `"gapmm"`: a gap (or any non-nucleotide) facing a non-gap is an `N`
 - Known differences from tn93: its reader drops characters outside `ACGTURYSWKMBDHVN?-` (here they
-  are gaps); it reads `U` as a separate code (here `U` = `T`); see item 4 of the changelog for a
-  base missing from a pair
+  are gaps); it reads `U` as a separate code (here `U` = `T`); with a base missing from a pair it
+  uses K2P (here the vanishing TN93 terms drop out, unless `tn93K2pFallback`)
 
 ### Performance Optimizations
 - Encode once, compare many times: 3 bits per site, 64 sites per `u64` word
