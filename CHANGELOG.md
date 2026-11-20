@@ -4,7 +4,7 @@ All notable changes to this project are recorded here. HIV-TRACE's `tn93`
 ([veg/tn93](https://github.com/veg/tn93), `src/tn93_shared.cc`) is the reference for what the
 ambiguity modes mean.
 
-## Unreleased
+## 0.2.0 - 2026-11-20
 
 ### Changed
 
