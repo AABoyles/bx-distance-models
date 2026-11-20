@@ -77,6 +77,18 @@ if (!flags.includes('--legacy-only') && bx.SequenceSet) {
     run(`set.distances('tn93'), 0.5% R/Y, ambiguity '${mode}'`, () => ambSet.distances('tn93'));
     ambSet.free();
   }
+  // tn93 -a resolve -g 0.015, as HIV-TRACE runs it
+  let gSet;
+  try {
+    gSet = new bx.SequenceSet(ambSeqs, 'resolve', { maxAmbiguityFraction: 0.015 });
+  } catch {}
+  if (gSet) {
+    run(`set.distances('tn93'), 0.5% R/Y, resolve -g 0.015`, () => gSet.distances('tn93'));
+    const links = run(`set.links('tn93', 0.015), 0.5% R/Y, resolve -g 0.015`, () => gSet.links('tn93', 0.015));
+    console.log(`${''.padEnd(52)} ${links.length.toLocaleString()} links`);
+    links.free();
+    gSet.free();
+  }
 
   // Gaps and N compared as ambiguity codes: every sequence has ragged gap ends and some N
   let gapSet;

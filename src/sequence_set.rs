@@ -1,10 +1,10 @@
 //! Batch API: encode a set of aligned sequences once, then compute any metric over all pairs.
 use std::ops::Range;
 
-use js_sys::{Float64Array, Uint32Array};
+use js_sys::{Float64Array, Object, Reflect, Uint32Array};
 use wasm_bindgen::prelude::*;
 
-use crate::counts::{count_pair, Counts, CountsWithGc, Mismatches, Resolutions, Tally};
+use crate::counts::{count_pair, Comparison, Counts, CountsWithGc, Mismatches, Tally};
 use crate::encoding::{Ambiguity, Encoded};
 use crate::metrics::{Metric, Scan, METRIC_NAMES};
 
@@ -16,8 +16,65 @@ use crate::metrics::{Metric, Scan, METRIC_NAMES};
 #[wasm_bindgen]
 pub struct SequenceSet {
     seqs: Vec<Encoded>,
-    /// Ambiguity resolution table; `None` in "skip" mode.
-    resolutions: Option<Resolutions>,
+    /// How ambiguity codes are compared; `None` in "skip" mode.
+    comparison: Option<Comparison>,
+}
+
+/// The `options` object of `new SequenceSet(seqs, ambiguity, options)`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct SetOptions {
+    /// `maxAmbiguityFraction`: tn93's `-g`, with `"resolve"` only.
+    pub max_ambiguity_fraction: Option<f64>,
+}
+
+const OPTION_NAMES: &str = "maxAmbiguityFraction";
+
+#[wasm_bindgen(typescript_custom_section)]
+const TS_TYPES: &str = r#"
+/** How `SequenceSet` compares ambiguity codes; the modes of HIV-TRACE's `tn93 -a`. */
+export type AmbiguityMode = 'skip' | 'resolve' | 'average' | 'gapmm';
+
+/** Options for `new SequenceSet(seqs, ambiguity, options)`. */
+export interface SequenceSetOptions {
+  /**
+   * With 'resolve' only, between 0 and 1: HIV-TRACE's `tn93 -a resolve -g FRACTION`. A pair whose
+   * resolved sites are at least this fraction of its compared sites is averaged instead.
+   */
+  maxAmbiguityFraction?: number;
+}
+"#;
+
+impl SetOptions {
+    /// Reads the options from a JS object; unknown keys are errors, so a typo is not ignored.
+    fn from_js(options: Option<&Object>) -> Result<SetOptions, String> {
+        let mut parsed = SetOptions::default();
+        let Some(options) = options else { return Ok(parsed) };
+        for key in Object::keys(options).iter() {
+            let name = key.as_string().unwrap_or_default();
+            let value = Reflect::get(options, &key).map_err(|_| format!("cannot read option '{name}'"))?;
+            match name.as_str() {
+                "maxAmbiguityFraction" if value.is_undefined() || value.is_null() => {}
+                "maxAmbiguityFraction" => {
+                    parsed.max_ambiguity_fraction =
+                        Some(value.as_f64().ok_or("maxAmbiguityFraction must be a number")?);
+                }
+                _ => return Err(format!("unknown option '{name}' (expected: {OPTION_NAMES})")),
+            }
+        }
+        Ok(parsed)
+    }
+
+    fn validate(&self, mode: Ambiguity) -> Result<(), String> {
+        if let Some(f) = self.max_ambiguity_fraction {
+            if mode != Ambiguity::Resolve {
+                return Err(format!("maxAmbiguityFraction needs ambiguity mode 'resolve', not '{}'", mode.name()));
+            }
+            if !(0.0..=1.0).contains(&f) {
+                return Err(format!("maxAmbiguityFraction must be between 0 and 1, got {f}"));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Pairs within a distance threshold, as parallel arrays: `source[k] < target[k]` are sequence
@@ -66,15 +123,26 @@ impl SequenceSet {
     /// as a match facing a base, or averaged. Gaps and other characters are skipped (outside
     /// `"gapmm"`). Only pairs involving a sequence that actually holds a compared ambiguity code
     /// pay for the extra passes.
+    ///
+    /// `options`:
+    /// - `maxAmbiguityFraction` (with `"resolve"` only, between 0 and 1): HIV-TRACE's
+    ///   `tn93 -a resolve -g FRACTION`. A pair is resolved, unless the sites it resolved are at
+    ///   least this fraction of its compared sites; then it is averaged instead. As in tn93, a
+    ///   resolved site is a base facing a code that contains it, or two ambiguity codes (N
+    ///   included) whether or not they share a base. 1 never averages; 0 always does.
     #[wasm_bindgen(constructor)]
-    pub fn new(seqs: Vec<String>, ambiguity: Option<String>) -> Result<SequenceSet, JsError> {
+    // The parameters keep their generated types (`string`, `object`), which leaves them optional
+    // in TypeScript; `unchecked_param_type` would make them required. The types above document
+    // what they accept.
+    pub fn new(seqs: Vec<String>, ambiguity: Option<String>, options: Option<Object>) -> Result<SequenceSet, JsError> {
         let mode = match ambiguity.as_deref() {
             None => Ambiguity::Skip,
             Some(name) => Ambiguity::parse(name).ok_or_else(|| {
                 JsError::new(&format!("unknown ambiguity mode '{name}' (expected skip, resolve, average or gapmm)"))
             })?,
         };
-        Ok(SequenceSet::from_strs(&seqs, mode))
+        let options = SetOptions::from_js(options.as_ref()).map_err(|e| JsError::new(&e))?;
+        SequenceSet::with_options(&seqs, mode, options).map_err(|e| JsError::new(&e))
     }
 
     /// Number of sequences.
@@ -128,9 +196,14 @@ impl SequenceSet {
 
 impl SequenceSet {
     pub(crate) fn from_strs<S: AsRef<str>>(seqs: &[S], mode: Ambiguity) -> SequenceSet {
-        let resolutions = mode.tracks_ambiguity().then(|| Resolutions::new(mode));
+        SequenceSet::with_options(seqs, mode, SetOptions::default()).expect("default options are valid")
+    }
+
+    pub(crate) fn with_options<S: AsRef<str>>(seqs: &[S], mode: Ambiguity, options: SetOptions) -> Result<SequenceSet, String> {
+        options.validate(mode)?;
+        let comparison = mode.tracks_ambiguity().then(|| Comparison::new(mode, options.max_ambiguity_fraction));
         let seqs = seqs.iter().map(|s| Encoded::new(s.as_ref().as_bytes(), mode)).collect();
-        SequenceSet { seqs, resolutions }
+        Ok(SequenceSet { seqs, comparison })
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -140,7 +213,7 @@ impl SequenceSet {
     /// Scans pair (i, j); `None` if it has more than `max_mismatches` mismatches.
     #[inline]
     pub(crate) fn tally<T: Tally>(&self, i: usize, j: usize, max_mismatches: f64) -> Option<T> {
-        count_pair(&self.seqs[i], &self.seqs[j], self.resolutions.as_ref(), max_mismatches)
+        count_pair(&self.seqs[i], &self.seqs[j], self.comparison.as_ref(), max_mismatches)
     }
 
     /// `metric` for pair (i, j), from the cheapest scan that serves it.
@@ -198,9 +271,9 @@ impl SequenceSet {
     /// loop cost them ~10%.
     fn fill_row<T: Tally>(&self, i: usize, metrics: &[Metric], row: &mut [f64], eval: impl Fn(Metric, &T) -> f64) {
         let x = &self.seqs[i];
-        match &self.resolutions {
+        match &self.comparison {
             None => self.fill_row_with(i, metrics, row, eval, |y| T::count_planes(&x.words, &y.words, f64::INFINITY)),
-            Some(table) => self.fill_row_with(i, metrics, row, eval, |y| count_pair(x, y, Some(table), f64::INFINITY)),
+            Some(c) => self.fill_row_with(i, metrics, row, eval, |y| count_pair(x, y, Some(c), f64::INFINITY)),
         }
     }
 

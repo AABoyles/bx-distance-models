@@ -79,6 +79,11 @@ bx-distance-models/
 - `Tally::add_full_sites()` → base vs `N` and `N` vs `N` sites from the `FullWord` planes (per-base
   popcounts × table entries), visiting only words where either sequence has one
 - `add_ambiguous_sites()` → partial codes (R, Y, ...), visiting only the sparse ambiguous sites
+- `Comparison` → the mode's `Resolutions`, plus `(fraction, average table)` for tn93's
+  `-a resolve -g` (`maxAmbiguityFraction`). The passes then count compared and "resolved" sites
+  (`Visited`, `counts_as_ambiguous`: base in code, or code vs code) as integers, only in that case
+  (`const COUNT`); a pair at or over the fraction is redone with the average table on top of the
+  same bit-plane counts
 - `count_pair::<T>()` → fast kernel, plus both passes (one out-of-line call) when either sequence
   has a compared ambiguity code. The dense row loop skips even that check in skip mode: an untaken
   per-pair branch there cost the ~30 ns/pair `Mismatches` scan ~10%
@@ -99,7 +104,8 @@ bx-distance-models/
   plus SNPs). `eval()` panics for T92, which must go through `eval_with_gc()`
 
 ### `sequence_set.rs` - Batch API
-- `SequenceSet::new(seqs, ambiguity?)` encodes once; `distances()` (dense, typed array), `links()`
+- `SequenceSet::new(seqs, ambiguity?, options?)` encodes once (`SetOptions`: `maxAmbiguityFraction`;
+  unknown keys are errors; `with_options` is the native-testable constructor); `distances()` (dense, typed array), `links()`
   (thresholded, with early exit), `distance()`, `row_splits()`
 - All batch methods take an optional row range; pair order is the row-major upper triangle
 - Dense output is written into the JS `Float64Array` row by row (no second full-size copy)

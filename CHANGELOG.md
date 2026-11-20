@@ -19,6 +19,13 @@ ambiguity modes mean.
 
 ### Added
 
+- `SequenceSet` option `maxAmbiguityFraction` for `'resolve'` mode: HIV-TRACE's
+  `tn93 -a resolve -g FRACTION`, natively. A pair is resolved unless the sites resolution touched
+  are at least that fraction of its compared sites; then it is averaged. As in tn93, a resolved
+  site is a base facing a code that contains it, or two ambiguity codes (N included) whether or
+  not they share a base. One scan per pair, and `links()` keeps its exact early exit:
+  `new SequenceSet(seqs, 'resolve', { maxAmbiguityFraction: 0.015 })`. Unknown options throw.
+- TypeScript types `AmbiguityMode` and `SequenceSetOptions`.
 - `SequenceSet` ambiguity mode `'gapmm'` (`tn93 -a gapmm`): as `'average'`, and a gap facing
   anything other than a gap is compared as an `N`, so a gap facing a base adds a quarter to each of
   the four (base, X) cells. Gap facing gap is skipped. Every metric supports it, not only TN93, and

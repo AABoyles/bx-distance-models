@@ -11,6 +11,10 @@ precision (this leaves the computation alone); building needs git, cmake and a C
 binary given in $TN93 must be built the same way. It runs as
 
     tn93 -q -t 1000 -l 1 -f csv -a MODE FILE
+    tn93 -q -t 1000 -l 1 -f csv -a resolve -g FRACTION FILE
+
+for every mode, and for -g (what HIV-TRACE runs) at 0.015 (HIV-TRACE's default), 0.05, and the
+edge cases 0 (every pair averaged) and 1 (never).
 
 The threshold 1000 is tn93's value for a saturated model (TN93_MAX_DIST), so those pairs are
 printed too; the library gives Infinity for them. tn93 leaves out pairs that compare at most one
@@ -40,7 +44,9 @@ OUT = os.path.join(HERE, "..", "tn93_distances.tsv")
 COMMIT = "076eb0f"
 FILES = ["distances.fasta", "ambiguity.fasta", "hivtrace-g.fasta", "n_codes.fasta", "random.fasta"]
 # (mode, -g fraction or None)
-CONFIGS = [("skip", None), ("resolve", None), ("average", None), ("gapmm", None)]
+CONFIGS = [("skip", None), ("resolve", None), ("average", None), ("gapmm", None)] + [
+    ("resolve", f) for f in (0.015, 0.05, 0.0, 1.0)
+]
 
 
 def write_random(path, seed=20261120):

@@ -93,10 +93,26 @@ check('ambiguity modes', () => {
   assert.equal(nAverage.distance('snps', 0, 1), 0.75);
   assert.equal(nAverage.distance('hamming', 0, 2), 0.75 / 5);
   [nSkip, nResolve, nAverage].forEach(s => s.free());
+
+  // tn93 -a resolve -g F: R facing A is 1 resolved site of 10, so averaged at 0.1, resolved above
+  const gSeqs = ['ACGTACGTAC', 'RCGTACGTAC'];
+  const g = f => new bx.SequenceSet(gSeqs, 'resolve', { maxAmbiguityFraction: f });
+  const [low, high] = [g(0.1), g(0.11)];
+  assert.equal(low.distance('snps', 0, 1), 0.5);
+  assert.equal(high.distance('snps', 0, 1), 0);
+  assert.equal(low.links('snps', 0).length, 0);
+  assert.equal(high.links('snps', 0).length, 1);
+  [low, high].forEach(s => s.free());
+  new bx.SequenceSet(gSeqs, 'resolve', {}).free();
+  new bx.SequenceSet(gSeqs, 'resolve', { maxAmbiguityFraction: undefined }).free();
 });
 
 check('errors are thrown as JS errors', () => {
   assert.throws(() => new bx.SequenceSet(seqs, 'bogus'), /unknown ambiguity mode/);
+  assert.throws(() => new bx.SequenceSet(seqs, 'resolve', { maxAmbiguity: 0.1 }), /unknown option 'maxAmbiguity'/);
+  assert.throws(() => new bx.SequenceSet(seqs, 'average', { maxAmbiguityFraction: 0.1 }), /needs ambiguity mode 'resolve'/);
+  assert.throws(() => new bx.SequenceSet(seqs, 'resolve', { maxAmbiguityFraction: 2 }), /between 0 and 1/);
+  assert.throws(() => new bx.SequenceSet(seqs, 'resolve', { maxAmbiguityFraction: '0.1' }), /must be a number/);
   assert.throws(() => set.distances('bogus'), /unknown metric/);
   assert.throws(() => set.distances('tn93', 3, 2), /invalid row range/);
   assert.throws(() => set.distance('tn93', 0, n), /out of range/);

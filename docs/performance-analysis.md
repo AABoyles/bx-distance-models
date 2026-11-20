@@ -372,6 +372,30 @@ pass. With ~3 N per sequence, every pair takes it: TN93 with 0.5% R/Y went from 
 in both modes. The pass touches only a few words here, so most of that is its fixed cost per pair
 (scaling nine table rows into the counts).
 
+## HIV-TRACE `-g`: resolve or average per pair
+
+`tn93 -a resolve -g F` resolves a pair unless the sites resolution touched are at least F of its
+compared sites, and averages it otherwise. Emulating it from outside means computing both a
+resolve and an average set in full and choosing per pair: twice the work, two dense blocks, and no
+early exit. Natively, the bit-plane counts are the same either way; only the ambiguity passes
+differ. They run with the resolution table while counting compared and resolved sites (exact
+integers; the weighted site sum can round below an integer), and a pair that turns out too
+ambiguous runs them again with the averaging table on top of the saved bit-plane counts. Resolve
+and average compare the same sites, so `links()` keeps its bound.
+
+`bench:api`, n = 600, L = 1,000, 0.5% R/Y and ~3 N per sequence (ns/pair, warm, medians of 3):
+
+| | resolve | `-g 0.015` |
+|---|---|---|
+| `distances('tn93')` | 205 | 279 |
+| `links('tn93', 0.015)` | | 33 |
+
+Counting visited sites costs the modes that do not need it: always on, it took resolve, average
+and GapMM from 197 to 215 ns/pair. It is now compiled in only for `-g` (a `const` generic), which
+recovered most of it; 205 against 197 remains (measured interleaved with a build of the previous
+commit). Replacing a closure with an inlined function and moving the passes out of line did not
+change it.
+
 ## Reproducing
 
 ```bash

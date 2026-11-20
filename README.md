@@ -179,6 +179,22 @@ TN93 distances agree with it to 1e-12 (see [Testing](#testing)):
   (any base), so a gap facing `A` adds a quarter to each of A-A, A-C, A-G and A-T: three quarters
   of a mismatch. Gap facing gap is skipped. Every metric uses it, not only TN93.
 
+**HIV-TRACE's `-g`** (`tn93 -a resolve -g FRACTION`, what HIV-TRACE runs) is `'resolve'` with a
+maximum ambiguity fraction:
+
+```javascript
+const set = new SequenceSet(seqs, 'resolve', { maxAmbiguityFraction: 0.015 });
+const links = set.links('tn93', 0.015); // early exit still applies
+```
+
+Each pair is resolved, unless the sites resolution touched are at least that fraction of the
+pair's compared sites; then the pair is averaged instead. As in tn93 (`ambig_count` in
+`computeTN93`), a resolved site is a base facing a code that contains it (`R` facing `A`, `N`
+facing anything), or two ambiguity codes facing each other, whether or not they share a base. A
+base facing a code that does not contain it (`R` facing `C`) is averaged in either case and does
+not count. 1 never averages, 0 always does. The decision costs one scan per pair: the bit-plane
+counts are shared, and only the ambiguous sites are counted again with the averaging table.
+
 **`N` and `?`** are fourfold ambiguity codes (any base) in `'resolve'`, `'average'` and
 `'gapmm'`, as in tn93: `N` facing `A` counts as a match (A-A) when resolving, and adds a quarter
 to each of A-A, A-C, A-G and A-T when averaging. `'skip'` and the single-pair functions skip them.
@@ -307,8 +323,14 @@ Ratio of transitions to transversions (useful for quality assessment).
 
 ### Batch Processing
 
-#### `new SequenceSet(seqs: string[], ambiguity?: 'skip' | 'resolve' | 'average' | 'gapmm')`
-Encodes aligned sequences once. Throws on an unknown ambiguity mode.
+#### `new SequenceSet(seqs: string[], ambiguity?: 'skip' | 'resolve' | 'average' | 'gapmm', options?: SequenceSetOptions)`
+Encodes aligned sequences once. Throws on an unknown ambiguity mode, an unknown option, or an
+invalid one. Options:
+
+- `maxAmbiguityFraction?: number` (`'resolve'` only, 0 to 1): HIV-TRACE's `-g`; see
+  [Ambiguity codes](#ambiguity-codes).
+
+The `.d.ts` exports `AmbiguityMode` and `SequenceSetOptions` for these arguments.
 
 - `length: number`: number of sequences.
 - `distance(metric, i, j) -> number`: one pair.

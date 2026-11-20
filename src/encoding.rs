@@ -68,6 +68,16 @@ impl Ambiguity {
         }
     }
 
+    /// The name `parse` accepts.
+    pub fn name(self) -> &'static str {
+        match self {
+            Ambiguity::Skip => "skip",
+            Ambiguity::Resolve => "resolve",
+            Ambiguity::Average => "average",
+            Ambiguity::GapMm => "gapmm",
+        }
+    }
+
     /// Whether sites holding ambiguity codes are compared at all.
     pub fn tracks_ambiguity(self) -> bool {
         self != Ambiguity::Skip

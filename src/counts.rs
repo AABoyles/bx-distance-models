@@ -206,7 +206,7 @@ impl Resolutions {
 const CHUNK: usize = 8;
 
 /// What a scan of one pair accumulates: full [`Counts`], or only [`Mismatches`].
-pub(crate) trait Tally: Sized {
+pub(crate) trait Tally: Copy {
     /// Scans the sites where both sequences hold an unambiguous base.
     ///
     /// Returns `None` as soon as the mismatches seen so far exceed `max_mismatches`. Mismatches
@@ -222,10 +222,13 @@ pub(crate) trait Tally: Sized {
     /// Adds what one resolved ambiguous site contributes.
     fn add_resolved(&mut self, site: &CountsWithGc);
 
+    /// Compared sites so far (weighted; an integer while every site weighs 1).
+    fn sites(&self) -> f64;
+
     /// Adds the sites where a base faces an `N`, or two `N`s face each other (see
     /// [`FullWord`]): every site whose contribution is fixed by the base alone, counted with
-    /// popcounts instead of one table lookup each.
-    fn add_full_sites(&mut self, x: &Encoded, y: &Encoded, table: &Resolutions);
+    /// popcounts instead of one table lookup each. Returns how many sites it added.
+    fn add_full_sites(&mut self, x: &Encoded, y: &Encoded, table: &Resolutions) -> u32;
 }
 
 /// Sites where one sequence holds a base and the other is compared as an `N`, by base, for each
@@ -269,6 +272,11 @@ impl FullSites {
         let by_base = |[n, lo, hi, t]: [u32; 4]| [n - lo - hi + t, lo - t, hi - t, t];
         FullSites { base1: by_base(s1), base2: by_base(s2), both }
     }
+
+    /// Every site counted: a base on one side and an N on the other, or N on both.
+    fn total(&self) -> u32 {
+        self.base1.iter().sum::<u32>() + self.base2.iter().sum::<u32>() + self.both
+    }
 }
 
 /// The non-zero words of `x`'s fully ambiguous plane that `other` also reaches, with their index.
@@ -278,13 +286,14 @@ fn full_words<'a>(x: &'a Encoded, other: &Encoded) -> impl Iterator<Item = (usiz
     x.full_index.iter().map(|&w| w as usize).take_while(move |&w| w < len).map(|w| (w, x.full[w]))
 }
 
-/// Adds every site of `full` to `tally`, scaled table entries per base.
-fn add_full_by_base(tally: &mut CountsWithGc, full: &FullSites, table: &Resolutions) {
+/// Adds every site of `full` to `tally`, scaled table entries per base. Returns the site count.
+fn add_full_by_base(tally: &mut CountsWithGc, full: &FullSites, table: &Resolutions) -> u32 {
     for b in 0..4 {
         tally.add_scaled(table.get(1 << b, ANY), full.base1[b] as f64);
         tally.add_scaled(table.get(ANY, 1 << b), full.base2[b] as f64);
     }
     tally.add_scaled(table.get(ANY, ANY), full.both as f64);
+    full.total()
 }
 
 impl Counts {
@@ -341,10 +350,15 @@ impl Tally for Counts {
         self.add_counts(&site.counts);
     }
 
-    fn add_full_sites(&mut self, x: &Encoded, y: &Encoded, table: &Resolutions) {
+    fn sites(&self) -> f64 {
+        self.sites
+    }
+
+    fn add_full_sites(&mut self, x: &Encoded, y: &Encoded, table: &Resolutions) -> u32 {
         let mut c = CountsWithGc::default();
-        add_full_by_base(&mut c, &FullSites::count(x, y), table);
+        let n = add_full_by_base(&mut c, &FullSites::count(x, y), table);
         self.add_counts(&c.counts);
+        n
     }
 }
 
@@ -360,8 +374,12 @@ impl Tally for CountsWithGc {
         self.gc1 += site.gc1;
     }
 
-    fn add_full_sites(&mut self, x: &Encoded, y: &Encoded, table: &Resolutions) {
-        add_full_by_base(self, &FullSites::count(x, y), table);
+    fn sites(&self) -> f64 {
+        self.counts.sites
+    }
+
+    fn add_full_sites(&mut self, x: &Encoded, y: &Encoded, table: &Resolutions) -> u32 {
+        add_full_by_base(self, &FullSites::count(x, y), table)
     }
 }
 
@@ -394,7 +412,11 @@ impl Tally for Mismatches {
 
     /// Only needs how many sites have an N on one side or both: a base facing an N weighs the
     /// same whatever the base (checked in `Resolutions::new`).
-    fn add_full_sites(&mut self, x: &Encoded, y: &Encoded, table: &Resolutions) {
+    fn sites(&self) -> f64 {
+        self.sites
+    }
+
+    fn add_full_sites(&mut self, x: &Encoded, y: &Encoded, table: &Resolutions) -> u32 {
         let (mut one, mut both) = (0u32, 0u32);
         for (w, [any1, n1]) in full_words(x, y) {
             let [any2, n2] = y.full.get(w).copied().unwrap_or_default();
@@ -411,58 +433,125 @@ impl Tally for Mismatches {
                 self.mismatches += n * site.counts.mismatches();
             }
         }
+        one + both
     }
+}
+
+/// Sites the ambiguity passes added to a pair, as integers.
+#[derive(Clone, Copy, Default)]
+struct Visited {
+    /// Compared sites (each weighs exactly 1).
+    sites: u32,
+    /// Sites tn93 counts toward `-g`'s ambiguity fraction in resolve mode (`ambig_count` in
+    /// `computeTN93`): a base facing a code that contains it, or two ambiguity codes, whether or
+    /// not they share a base. A base facing a code without it is averaged and does not count.
+    ambiguous: u32,
+}
+
+/// Whether tn93 counts a site holding codes `c1` and `c2` (at least one ambiguous) as resolved.
+#[inline]
+fn counts_as_ambiguous(c1: u8, c2: u8) -> bool {
+    c1 & c2 != 0 || (c1.count_ones() > 1 && c2.count_ones() > 1)
 }
 
 /// Ambiguity fallback: adds the sites where at least one sequence holds a partial ambiguity
 /// code and the other holds any base, a partial code or (in modes that compare them) an `N`.
 /// Only called when one of the two tracks ambiguities. Visits only the (sparse) ambiguous sites
-/// of each sequence.
-pub(crate) fn add_ambiguous_sites<T: Tally>(x: &Encoded, y: &Encoded, table: &Resolutions, tally: &mut T) {
+/// of each sequence. Counts what it visits only with `COUNT` (for a maximum ambiguity fraction):
+/// always counting cost the other modes ~8%.
+fn add_ambiguous_sites<T: Tally, const COUNT: bool>(x: &Encoded, y: &Encoded, table: &Resolutions, tally: &mut T) -> Visited {
+    let mut visited = Visited::default();
+    let mut add = |c1: u8, c2: u8| {
+        if c1 != 0 && c2 != 0 {
+            tally.add_resolved(table.get(c1, c2));
+            if COUNT {
+                visited.sites += 1;
+                visited.ambiguous += counts_as_ambiguous(c1, c2) as u32;
+            }
+        }
+    };
     if let Some(ax) = &x.ambiguity {
         for (&k, &cx) in ax.positions.iter().zip(&ax.codes) {
-            let cy = y.code_at(k as usize);
-            if cy != 0 {
-                tally.add_resolved(table.get(cx, cy));
-            }
+            add(cx, y.code_at(k as usize));
         }
     }
     if let Some(ay) = &y.ambiguity {
         for (&k, &cy) in ay.positions.iter().zip(&ay.codes) {
             // Sites ambiguous in both were counted above; base_code_at gives 0 for them.
-            let cx = x.base_code_at(k as usize);
-            if cx != 0 {
-                tally.add_resolved(table.get(cx, cy));
-            }
+            add(x.base_code_at(k as usize), cy);
         }
+    }
+    visited
+}
+
+/// How a set compares ambiguity codes: the resolution table for its mode and, for tn93's
+/// `-a resolve -g FRACTION`, the averaging table it falls back to for too ambiguous pairs.
+pub(crate) struct Comparison {
+    pub table: Resolutions,
+    /// `(fraction, average)`: a pair whose resolved ambiguous sites (see [`Visited`]) are at
+    /// least `fraction` of its compared sites is averaged instead. Only with `fraction < 1`.
+    pub average_above: Option<(f64, Resolutions)>,
+}
+
+impl Comparison {
+    pub fn new(mode: Ambiguity, max_ambiguity_fraction: Option<f64>) -> Self {
+        let average_above = max_ambiguity_fraction
+            .filter(|&f| f < 1.0)
+            .map(|f| (f, Resolutions::new(Ambiguity::Average)));
+        Comparison { table: Resolutions::new(mode), average_above }
     }
 }
 
 /// Scans one pair of encoded sequences: fast kernel, plus the passes over sites compared as `N`
 /// and over partial ambiguity codes when either sequence has any (which only happens when
-/// `table` is set).
+/// ambiguity codes are compared at all).
 ///
 /// Early exit only looks at the fast kernel's mismatches. The other passes only add mismatches,
-/// so a pair that already has too many cannot come back under the bound.
+/// so a pair that already has too many cannot come back under the bound, whichever table the
+/// pair ends up using: resolving and averaging compare the same sites.
 #[inline]
-pub(crate) fn count_pair<T: Tally>(x: &Encoded, y: &Encoded, table: Option<&Resolutions>, max_mismatches: f64) -> Option<T> {
+pub(crate) fn count_pair<T: Tally>(x: &Encoded, y: &Encoded, comparison: Option<&Comparison>, max_mismatches: f64) -> Option<T> {
     let mut tally = T::count_planes(&x.words, &y.words, max_mismatches)?;
-    if let Some(table) = table {
+    if let Some(comparison) = comparison {
         if x.has_ambiguity() || y.has_ambiguity() {
-            add_ambiguity_passes(x, y, table, &mut tally);
+            add_ambiguity_passes(x, y, comparison, &mut tally);
         }
     }
     Some(tally)
 }
 
-/// Both passes over compared ambiguity codes, in one out-of-line call, so that `count_pair`,
-/// which is inlined into every row loop, stays small.
+/// The passes over compared ambiguity codes, in one out-of-line call, so that `count_pair`,
+/// which is inlined into every row loop, stays small. With a maximum ambiguity fraction, the
+/// passes run with the resolution table and, if the pair turns out too ambiguous, again with the
+/// averaging table on top of the same fast-kernel counts.
 #[inline(never)]
-fn add_ambiguity_passes<T: Tally>(x: &Encoded, y: &Encoded, table: &Resolutions, tally: &mut T) {
+fn add_ambiguity_passes<T: Tally>(x: &Encoded, y: &Encoded, comparison: &Comparison, tally: &mut T) {
+    let Some((fraction, average)) = &comparison.average_above else {
+        add_passes::<T, false>(x, y, &comparison.table, tally);
+        return;
+    };
+    let planes = *tally;
+    let visited = add_passes::<T, true>(x, y, &comparison.table, tally);
+    // Exact integer site counts: the weighted sum can round below an integer.
+    let sites = planes.sites() + visited.sites as f64;
+    if sites * fraction <= visited.ambiguous as f64 {
+        *tally = planes;
+        add_passes::<T, false>(x, y, average, tally);
+    }
+}
+
+fn add_passes<T: Tally, const COUNT: bool>(x: &Encoded, y: &Encoded, table: &Resolutions, tally: &mut T) -> Visited {
+    let mut visited = Visited::default();
     if x.has_full() || y.has_full() {
-        tally.add_full_sites(x, y, table);
+        // In the modes that average too ambiguous pairs (resolve), these are bases facing an N,
+        // or two Ns: every one counts as ambiguous.
+        let n = tally.add_full_sites(x, y, table);
+        visited = Visited { sites: n, ambiguous: n };
     }
     if x.ambiguity.is_some() || y.ambiguity.is_some() {
-        add_ambiguous_sites(x, y, table, tally);
+        let sparse = add_ambiguous_sites::<T, COUNT>(x, y, table, tally);
+        visited.sites += sparse.sites;
+        visited.ambiguous += sparse.ambiguous;
     }
+    visited
 }

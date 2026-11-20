@@ -4,7 +4,7 @@ mod tests {
     use crate::counts::{Counts, CountsWithGc, Mismatches};
     use crate::encoding::{Ambiguity, IUPAC};
     use crate::metrics::{self, Metric, Scan};
-    use crate::sequence_set::{pairs_in_rows, row_splits, Links, SequenceSet};
+    use crate::sequence_set::{pairs_in_rows, row_splits, Links, SequenceSet, SetOptions};
 
     #[test]
     fn test_hamming_identical() {
@@ -659,6 +659,61 @@ mod tests {
         }
         // Ambiguity::parse accepts the name in any case
         assert_eq!(Ambiguity::parse("GapMM"), Some(Ambiguity::GapMm));
+    }
+
+    fn max_fraction(seqs: &[&str], fraction: f64) -> SequenceSet {
+        let options = SetOptions { max_ambiguity_fraction: Some(fraction) };
+        SequenceSet::with_options(seqs, Ambiguity::Resolve, options).unwrap()
+    }
+
+    #[test]
+    fn max_ambiguity_fraction_averages_too_ambiguous_pairs() {
+        // R facing A resolves to a match: 1 resolved site of 10
+        let seqs = ["ACGTACGTAC", "RCGTACGTAC"];
+        let resolved = set_counts(seqs[0], seqs[1], Ambiguity::Resolve);
+        let averaged = set_counts(seqs[0], seqs[1], Ambiguity::Average);
+        assert_ne!(resolved, averaged);
+        let at = |f: f64| max_fraction(&seqs, f).tally::<Counts>(0, 1, f64::INFINITY).unwrap();
+        // tn93 averages when sites * fraction <= resolved sites: 10 * 0.1 <= 1
+        assert_eq!(at(0.1), averaged);
+        assert_eq!(at(0.11), resolved);
+        // 0 always averages; 1 never does (tn93 only applies -g below 1)
+        assert_eq!(at(0.0), averaged);
+        assert_eq!(at(1.0), resolved);
+        // Without ambiguity codes there is nothing to decide
+        let plain = max_fraction(&["ACGT", "ACGA"], 0.0).tally::<Counts>(0, 1, f64::INFINITY).unwrap();
+        assert_eq!(plain, set_counts("ACGT", "ACGA", Ambiguity::Skip));
+    }
+
+    #[test]
+    fn max_ambiguity_fraction_counts_resolved_sites_as_tn93_does() {
+        // Site 0: R facing A, resolved (counts). Site 9: R facing C, shares no base, so averaged
+        // either way (does not count). 1 of 10 sites at 0.15: resolved. Counting every site
+        // holding a partial code instead (2 of 10) would average this pair.
+        let seqs = ["ACGTACGTAC", "RCGTACGTAR"];
+        let got = max_fraction(&seqs, 0.15).tally::<Counts>(0, 1, f64::INFINITY).unwrap();
+        assert_eq!(got, set_counts(seqs[0], seqs[1], Ambiguity::Resolve));
+        assert_ne!(got, set_counts(seqs[0], seqs[1], Ambiguity::Average));
+        // Two ambiguity codes count whether or not they share a base (R vs Y, site 0), and N
+        // counts like any other code (N facing G, site 2): 2 of 10 sites, averaged at 0.2
+        let seqs = ["RCNTACGTAC", "YCGTACGTAC"];
+        let got = max_fraction(&seqs, 0.2).tally::<Counts>(0, 1, f64::INFINITY).unwrap();
+        assert_eq!(got, set_counts(seqs[0], seqs[1], Ambiguity::Average));
+        let got = max_fraction(&seqs, 0.21).tally::<Counts>(0, 1, f64::INFINITY).unwrap();
+        assert_eq!(got, set_counts(seqs[0], seqs[1], Ambiguity::Resolve));
+    }
+
+    #[test]
+    fn max_ambiguity_fraction_is_validated() {
+        let with = |mode, f| SequenceSet::with_options(&["ACGT"], mode, SetOptions { max_ambiguity_fraction: Some(f) });
+        assert!(with(Ambiguity::Resolve, 0.015).is_ok());
+        for mode in [Ambiguity::Skip, Ambiguity::Average, Ambiguity::GapMm] {
+            let err = with(mode, 0.015).err().unwrap();
+            assert!(err.contains("maxAmbiguityFraction needs ambiguity mode 'resolve'"), "{err}");
+        }
+        for f in [-0.1, 1.5, f64::NAN] {
+            assert!(with(Ambiguity::Resolve, f).err().unwrap().contains("between 0 and 1"), "{f}");
+        }
     }
 
     #[test]
