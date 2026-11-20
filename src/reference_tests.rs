@@ -229,10 +229,9 @@ mod tn93 {
         }
     }
 
-    /// Whether the library implements tn93's handling of this configuration for this pair yet.
-    fn supported(mode: &str, fraction: Option<f64>, a: &str, b: &str) -> bool {
-        let has_n = |s: &str| s.bytes().any(|c| matches!(c, b'N' | b'n' | b'?'));
-        fraction.is_none() && !(matches!(mode, "resolve" | "average") && (has_n(a) || has_n(b)))
+    /// Whether the library implements tn93's handling of this configuration yet.
+    fn supported(fraction: Option<f64>) -> bool {
+        fraction.is_none()
     }
 
     #[test]
@@ -251,7 +250,7 @@ mod tn93 {
         for row in rows() {
             let Loaded { set, index, seqs } = sets.get(row.file, row.mode);
             let (i, j) = (index[row.id1], index[row.id2]);
-            if !supported(row.mode, row.fraction, &seqs[i], &seqs[j]) {
+            if !supported(row.fraction) {
                 continue;
             }
             let id = format!("{} -a {} {} {}", row.file, row.mode, row.id1, row.id2);
@@ -273,7 +272,7 @@ mod tn93 {
             }
             checked += 1;
         }
-        assert!(checked >= 950 && missing_base <= 10, "{checked} pairs checked, {missing_base} missing a base");
+        assert!(checked >= 1400 && missing_base <= 10, "{checked} pairs checked, {missing_base} missing a base");
     }
 
     /// `links()` stops scanning a pair early once it cannot pass the threshold; on tn93's own
@@ -285,25 +284,21 @@ mod tn93 {
         let mut groups: Vec<(&str, &str, Option<f64>)> = rows.iter().map(|r| (r.file, r.mode, r.fraction)).collect();
         groups.dedup();
         for (file, mode, fraction) in groups {
-            let Loaded { set, index, seqs } = sets.get(file, mode);
-            let supported = |i: usize, j: usize| supported(mode, fraction, &seqs[i], &seqs[j]);
+            if !supported(fraction) {
+                continue;
+            }
+            let Loaded { set, index, .. } = sets.get(file, mode);
             for threshold in [0.0, 0.01, 0.03, 0.1, 0.5] {
                 let mut want: Vec<(u32, u32)> = rows
                     .iter()
                     .filter(|r| (r.file, r.mode, r.fraction) == (file, mode, fraction))
                     .map(|r| (index[r.id1], index[r.id2], r.tn93))
-                    .filter(|&(i, j, d)| d.is_some_and(|d| d <= threshold) && supported(i, j))
+                    .filter(|&(_, _, d)| d.is_some_and(|d| d <= threshold))
                     .map(|(i, j, _)| (i as u32, j as u32))
                     .collect();
                 want.sort();
                 let links = set.sparse(Metric::Tn93, threshold, 0..set.len());
-                let got: Vec<(u32, u32)> = links
-                    .source
-                    .iter()
-                    .zip(&links.target)
-                    .map(|(&i, &j)| (i, j))
-                    .filter(|&(i, j)| supported(i as usize, j as usize))
-                    .collect();
+                let got: Vec<(u32, u32)> = links.source.iter().zip(&links.target).map(|(&i, &j)| (i, j)).collect();
                 assert_eq!(got, want, "{file} -a {mode} -g {fraction:?}, threshold {threshold}");
             }
         }

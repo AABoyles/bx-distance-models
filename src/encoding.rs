@@ -73,9 +73,10 @@ impl Ambiguity {
         self != Ambiguity::Skip
     }
 
-    /// Whether `N` and `?` are compared as fourfold ambiguity codes.
+    /// Whether `N` and `?` are compared as fourfold ambiguity codes: in every mode that
+    /// compares ambiguity codes, as tn93 does.
     pub fn compares_n(self) -> bool {
-        self == Ambiguity::GapMm
+        self != Ambiguity::Skip
     }
 
     /// Whether a gap (or any other character that is not a nucleotide) facing a non-gap is

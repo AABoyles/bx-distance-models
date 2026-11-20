@@ -87,7 +87,7 @@ const distance = hamming_distance(seq1, seq2);
 ```
 
 Partial IUPAC ambiguity codes (`R`, `Y`, `S`, `W`, `K`, `M`, `B`, `D`, `H`, `V`) are skipped by
-the single-pair functions. `SequenceSet` can resolve them instead; see
+the single-pair functions. `SequenceSet` can resolve them, and `N`, instead; see
 [Ambiguity codes](#ambiguity-codes).
 
 ### Transition/Transversion Analysis
@@ -177,15 +177,23 @@ TN93 distances agree with it to 1e-12 (see [Testing](#testing)):
   (`R` vs `A` is half a match and half an A↔G transition). Counts can be fractional.
 - `'gapmm'`: as `'average'`, and a gap facing anything other than a gap is compared as an `N`
   (any base), so a gap facing `A` adds a quarter to each of A-A, A-C, A-G and A-T: three quarters
-  of a mismatch. Gap facing gap is skipped. `N` and `?` are fourfold ambiguity codes, and every
-  other character that is not a nucleotide (`.`, `X`, ...) is a gap. Every metric uses it, not
-  only TN93.
+  of a mismatch. Gap facing gap is skipped. Every metric uses it, not only TN93.
+
+**`N` and `?`** are fourfold ambiguity codes (any base) in `'resolve'`, `'average'` and
+`'gapmm'`, as in tn93: `N` facing `A` counts as a match (A-A) when resolving, and adds a quarter
+to each of A-A, A-C, A-G and A-T when averaging. `'skip'` and the single-pair functions skip them.
+Releases up to 0.1.0 skipped `N` in every mode (see the [changelog](CHANGELOG.md)).
+
+**Other characters** that are not nucleotides (`-`, `.`, `X`, `*`, digits, ...) are gaps: skipped,
+or compared as `N` in `'gapmm'`. tn93 itself drops such characters while reading FASTA (shifting
+the rest of the sequence), which an aligned per-site comparison cannot do. `U` is read as `T`
+everywhere; tn93 reads it as a separate code that skip mode skips.
 
 Sequences without ambiguity codes still use the fast path; only pairs involving a sequence that
 contains them pay for the extra work. Partial codes are visited one by one, which costs in
-proportion to their number; sites compared as `N` (gaps in `'gapmm'`) are counted with popcounts
-over the 64-site words that hold any. `set.ambiguous_count()` reports how many sequences need
-either. Outside `'gapmm'`, `N` and `?` are skipped.
+proportion to their number; sites compared as `N` (and gaps in `'gapmm'`) are counted with
+popcounts over the 64-site words that hold any. `set.ambiguous_count()` reports how many
+sequences need either.
 
 #### Legacy batch functions
 

@@ -367,6 +367,11 @@ fallback, which now reads gaps and `N` as code 15.
 - `links()` keeps its exact early exit: the extra passes only add mismatches, and a sequence's
   `informative` count includes every site it could have compared as an `N`.
 
+`'resolve'` and `'average'` compare `N` and `?` the same way (as tn93 does), through the same
+pass. With ~3 N per sequence, every pair takes it: TN93 with 0.5% R/Y went from 155 to 197 ns/pair
+in both modes. The pass touches only a few words here, so most of that is its fixed cost per pair
+(scaling nine table rows into the counts).
+
 ## Reproducing
 
 ```bash

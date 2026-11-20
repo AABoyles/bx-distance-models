@@ -60,11 +60,12 @@ impl SequenceSet {
     /// - `"skip"` (default): ignore them. Every pair uses the fast bit-plane kernel.
     /// - `"resolve"`: count a site as a match if the two codes share a base, otherwise average.
     /// - `"average"`: average over every pair of bases the two codes allow.
-    /// - `"gapmm"`: as `"average"`, and compare a gap facing anything but a gap as an `N`
-    ///   (any base, averaged). `N` and `?` are compared as fourfold ambiguity codes.
+    /// - `"gapmm"`: as `"average"`, and compare a gap facing anything but a gap as an `N`.
     ///
-    /// Otherwise `N`, gaps and other characters are skipped. Only pairs involving a sequence
-    /// that actually holds a compared ambiguity code pay for the extra passes.
+    /// Except in `"skip"` mode, `N` and `?` are fourfold ambiguity codes (any base): resolved
+    /// as a match facing a base, or averaged. Gaps and other characters are skipped (outside
+    /// `"gapmm"`). Only pairs involving a sequence that actually holds a compared ambiguity code
+    /// pay for the extra passes.
     #[wasm_bindgen(constructor)]
     pub fn new(seqs: Vec<String>, ambiguity: Option<String>) -> Result<SequenceSet, JsError> {
         let mode = match ambiguity.as_deref() {

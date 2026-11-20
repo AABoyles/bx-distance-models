@@ -125,9 +125,12 @@ bx-distance-models/
   by default compare only sites where both sequences hold A/C/G/T (any case, U = T); everything
   else is skipped and not counted in the denominator
 - Partial IUPAC codes are skipped by default; `SequenceSet` with `"resolve"`/`"average"`/`"gapmm"`
-  resolves them
-- `"gapmm"`: a gap (or any non-nucleotide) facing a non-gap is an `N`; `N` and `?` are fourfold codes
-- Otherwise `N` is skipped
+  resolves them, and `N`/`?` as fourfold codes (any base), as tn93 does. Skip mode and the
+  single-pair functions skip `N`
+- `"gapmm"`: a gap (or any non-nucleotide) facing a non-gap is an `N`
+- Known differences from tn93: its reader drops characters outside `ACGTURYSWKMBDHVN?-` (here they
+  are gaps); it reads `U` as a separate code (here `U` = `T`); see item 4 of the changelog for a
+  base missing from a pair
 
 ### Performance Optimizations
 - Encode once, compare many times: 3 bits per site, 64 sites per `u64` word

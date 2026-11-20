@@ -584,11 +584,31 @@ mod tests {
     }
 
     #[test]
-    fn n_and_gaps_are_not_compared_outside_gapmm() {
-        for mode in [Ambiguity::Skip, Ambiguity::Resolve, Ambiguity::Average] {
-            let c = set_counts("ANR-T", "ARNRT", mode);
-            assert_eq!(c.sites, 2.0, "{mode:?}");
+    fn gaps_are_not_compared_outside_gapmm_nor_n_in_skip_mode() {
+        // A/A, N/R, R/N, -/R, T/T: N is an ambiguity code wherever ambiguity codes are compared
+        assert_eq!(set_counts("ANR-T", "ARNRT", Ambiguity::Skip).sites, 2.0);
+        for mode in [Ambiguity::Resolve, Ambiguity::Average] {
+            assert_eq!(set_counts("ANR-T", "ARNRT", mode).sites, 4.0, "{mode:?}");
         }
+        assert_eq!(set_counts("ANR-T", "ARNRT", Ambiguity::GapMm).sites, 5.0);
+    }
+
+    #[test]
+    fn n_and_question_mark_are_any_base_when_resolving() {
+        // tn93 -a resolve: N facing A counts as a match (A-A += 1)
+        for n in ["N", "n", "?"] {
+            let c = set_counts_with_gc(n, "A", Ambiguity::Resolve);
+            assert_eq!((c.counts.sites, c.counts.mismatches(), c.counts.freq, c.gc1), (1.0, 0.0, [2.0, 0.0, 0.0, 0.0], 0.0));
+            // N facing R: resolved to the shared bases, half A-A and half G-G
+            let c = set_counts(n, "R", Ambiguity::Resolve);
+            assert_eq!((c.sites, c.mismatches(), c.freq), (1.0, 0.0, [1.0, 0.0, 1.0, 0.0]));
+        }
+        // tn93 -a average: N facing A adds 1/4 to each of A-A, A-C, A-G and A-T
+        let c = set_counts_with_gc("A", "N", Ambiguity::Average);
+        assert_eq!((c.counts.sites, c.counts.ts_purine, c.counts.transversions), (1.0, 0.25, 0.5));
+        assert_eq!((c.counts.freq, c.gc1), ([1.25, 0.25, 0.25, 0.25], 0.0));
+        // Skip mode is unchanged: N is not compared
+        assert_eq!(set_counts("N?", "AC", Ambiguity::Skip).sites, 0.0);
     }
 
     #[test]

@@ -79,6 +79,20 @@ check('ambiguity modes', () => {
   assert.equal(gapmm.distance('snps', 0, 2), 0);
   assert.ok(gapmm.distance('tn93', 0, 1) > 0);
   gapmm.free();
+
+  // N and ? are any base outside skip mode: a match when resolved, 3/4 mismatch when averaged
+  const withN = ['ACGTA', 'ACGNA', 'AC?TA'];
+  const nSkip = new bx.SequenceSet(withN);
+  const nResolve = new bx.SequenceSet(withN, 'resolve');
+  const nAverage = new bx.SequenceSet(withN, 'average');
+  assert.equal(nSkip.ambiguous_count(), 0);
+  assert.equal(nResolve.ambiguous_count(), 2);
+  assert.equal(nSkip.distance('hamming', 0, 1), 0);
+  assert.equal(nResolve.distance('hamming', 0, 1), 0);
+  assert.equal(nResolve.distance('hamming', 0, 2), 0);
+  assert.equal(nAverage.distance('snps', 0, 1), 0.75);
+  assert.equal(nAverage.distance('hamming', 0, 2), 0.75 / 5);
+  [nSkip, nResolve, nAverage].forEach(s => s.free());
 });
 
 check('errors are thrown as JS errors', () => {
